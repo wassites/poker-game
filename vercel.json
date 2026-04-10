@@ -1,4 +1,3 @@
-vercel.json << 'EOF'
 {
   "headers": [
     {
@@ -12,4 +11,3 @@ vercel.json << 'EOF'
     }
   ]
 }
-EOF
