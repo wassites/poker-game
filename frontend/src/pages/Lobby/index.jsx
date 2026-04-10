@@ -2,38 +2,29 @@
    ARQUIVO: frontend/src/pages/Lobby/index.jsx
 
    CONCEITO GERAL:
-   Esta é a página principal do Lobby. Ela não faz nada sozinha —
-   ela MONTA os componentes menores e gerencia o estado global
-   da tela (qual tab está ativa, quais modais estão abertos, etc).
+   Página principal do Lobby. Orquestra os componentes menores
+   e gerencia o estado global da tela.
 
-   RESPONSABILIDADE ÚNICA:
-   index.jsx só cuida de ORQUESTRAR. Cada pedaço visual
-   fica no seu próprio componente. Isso se chama "separação
-   de responsabilidades" — um dos princípios mais importantes
-   do desenvolvimento de software.
+   RESPONSIVIDADE:
+   Mobile  → layout vertical, max-width 480px, uma coluna
+   Desktop → layout de duas colunas:
+               Esquerda: tabs + lista de mesas (flex: 1)
+               Direita:  ranking fixo (320px)
 
-   FLUXO DE DADOS:
-   Socket.io → index.jsx (estado) → componentes filhos (visual)
-   Componentes filhos → callbacks → index.jsx → Socket.io
+   RANKING (NOVO):
+   Busca o ranking via GET /ranking do backend.
+   Atualiza a cada 60 segundos automaticamente.
+   Exibido na coluna direita (desktop) e na tab Ranking (mobile).
 
-   ARQUIVOS QUE ESTE COMPONENTE USA:
-   → Header.jsx          (avatar, nome, saldo ₿C)
-   → Tabs.jsx            (navegação entre seções)
-   → ListaMesas.jsx      (cards das mesas)
-   → Ranking.jsx         (top jogadores)
-   → Loja/index.jsx      (comprar ₿C e temas)
-   → ModalCriarMesa.jsx  (formulário nova mesa)
-   → ModalSenha.jsx      (senha mesa privada)
-
-   PROPS RECEBIDAS:
-   → usuario    : { uid, nome, avatar, saldo, rankPontos, tema }
-   → socket     : instância do Socket.io já conectada
-   → onEntrarMesa : função chamada quando entra em uma mesa
+   PROPS:
+     usuario      → { uid, nome, avatar, saldo, rankPontos, tema }
+     socket       → instância do Socket.io já conectada
+     onEntrarMesa → função chamada quando entra em uma mesa
 ================================================================ */
 
 import { useState, useEffect, useCallback } from 'react';
+import { getAuth, signOut }                 from 'firebase/auth';
 
-// Componentes filhos — cada um em seu próprio arquivo
 import Header         from './Header';
 import Tabs           from './Tabs';
 import ListaMesas     from './ListaMesas';
@@ -47,22 +38,16 @@ import ModalSenha     from './ModalSenha';
 // BLOCO 1: CONSTANTES
 // ================================================================
 
-// IDs das tabs — usamos constantes para evitar erros de digitação
-// Se escrevermos 'publicas' errado em algum lugar, o JS avisa
 const TABS = {
-    PUBLICAS:  'publicas',
-    PRIVADAS:  'privadas',
-    RANKING:   'ranking',
-    LOJA:      'loja',
+    PUBLICAS: 'publicas',
+    PRIVADAS: 'privadas',
+    RANKING:  'ranking',
+    LOJA:     'loja',
 };
 
-// URL base do servidor backend
-// import.meta.env é como o Vite lê as variáveis de ambiente (.env)
-// VITE_SERVER_URL deve estar no arquivo frontend/.env
-const SERVER_URL = import.meta.env.VITE_SERVER_URL || 'http://localhost:3001';
-
-// Intervalo de atualização da lista de mesas (em ms)
-const INTERVALO_ATUALIZAR = 10000; // 10 segundos
+const SERVER_URL          = import.meta.env.VITE_SERVER_URL || 'http://localhost:3001';
+const INTERVALO_MESAS     = 10000; // atualiza mesas a cada 10 segundos
+const INTERVALO_RANKING   = 60000; // atualiza ranking a cada 60 segundos
 
 
 // ================================================================
@@ -71,123 +56,99 @@ const INTERVALO_ATUALIZAR = 10000; // 10 segundos
 
 export default function Lobby({ usuario, socket, onEntrarMesa }) {
 
-    // ----------------------------------------------------------------
-    // ESTADO DO LOBBY
-    //
-    // useState: cria variáveis que quando mudam, re-renderizam o componente.
-    // Cada useState é independente — mudar um não afeta os outros.
-    // ----------------------------------------------------------------
-
-    // Tab atualmente visível
-    const [tabAtiva, setTabAtiva] = useState(TABS.PUBLICAS);
-
-    // Listas de mesas vindas do servidor
+    const [tabAtiva,      setTabAtiva     ] = useState(TABS.PUBLICAS);
     const [mesasPublicas, setMesasPublicas] = useState([]);
     const [mesasPrivadas, setMesasPrivadas] = useState([]);
 
-    // Ranking dos melhores jogadores
-    const [ranking, setRanking] = useState([]);
+    // ranking: array de jogadores com posicao, nome, vitorias, fichasLiquidas, etc.
+    // setRanking: atualizado pela função buscarRanking abaixo
+    const [ranking,       setRanking      ] = useState([]);
 
-    // Controla quais modais estão abertos
-    // null = fechado, qualquer outro valor = aberto
-    const [modalCriar, setModalCriar] = useState(false);
-    const [modalSenha, setModalSenha] = useState(null); // guarda o mesaId
-
-    // Estado de carregamento — mostra um spinner enquanto busca as mesas
-    const [carregando, setCarregando] = useState(true);
-
-    // Mensagem de erro (ex: servidor fora do ar)
-    const [erro, setErro] = useState(null);
+    const [modalCriar,    setModalCriar   ] = useState(false);
+    const [modalSenha,    setModalSenha   ] = useState(null);
+    const [carregando,    setCarregando   ] = useState(true);
+    const [erro,          setErro         ] = useState(null);
 
 
     // ----------------------------------------------------------------
-    // BUSCA DE MESAS
-    //
-    // useCallback: memoriza a função para não recriar a cada render.
-    // Necessário aqui porque essa função é usada no useEffect abaixo.
-    // Sem useCallback, o useEffect rodaria infinitamente.
+    // Busca mesas do servidor via HTTP GET /mesas
     // ----------------------------------------------------------------
     const buscarMesas = useCallback(async () => {
         try {
             setErro(null);
-
-            // fetch: faz uma requisição HTTP GET para o servidor
             const res  = await fetch(`${SERVER_URL}/mesas`);
-
-            // Se o servidor retornou erro (ex: 500), lança exceção
             if (!res.ok) throw new Error(`Servidor retornou ${res.status}`);
-
             const data = await res.json();
-
-            // Separa mesas públicas e privadas
-            // .filter() cria um novo array com só os elementos que passam no teste
             setMesasPublicas(data.mesas.filter(m => !m.temSenha));
             setMesasPrivadas(data.mesas.filter(m =>  m.temSenha));
-
         } catch (e) {
             console.error('Erro ao buscar mesas:', e);
-            setErro('Não foi possível carregar as mesas. Tente novamente.');
+            setErro('Não foi possível carregar as mesas.');
         } finally {
-            // finally roda sempre — com erro ou sem erro
-            // Garante que o spinner desaparece independente do resultado
             setCarregando(false);
         }
-    }, []); // Array vazio: não tem dependências, nunca recria
+    }, []);
 
 
     // ----------------------------------------------------------------
-    // EFEITO: busca mesas ao montar e atualiza periodicamente
+    // Busca ranking do servidor via HTTP GET /ranking
     //
-    // useEffect com cleanup: o return cancela o intervalo quando
-    // o componente é desmontado (ex: jogador entrou na mesa).
-    // Sem o cleanup, o intervalo continuaria rodando em background,
-    // consumindo memória e causando erros.
+    // NOVO: chama a rota que criamos no server.js.
+    // O backend busca os dados do Firestore (salvos pelo game-manager)
+    // e retorna os top 20 jogadores ordenados por fichasLiquidas.
+    //
+    // useCallback com [] — nunca recria a função entre renders.
     // ----------------------------------------------------------------
+    const buscarRankingAPI = useCallback(async () => {
+        try {
+            const res = await fetch(`${SERVER_URL}/ranking?top=20`);
+            if (!res.ok) return;
+            const data = await res.json();
+            setRanking(data.ranking || []);
+        } catch (e) {
+            console.error('Erro ao buscar ranking:', e);
+        }
+    }, []);
+
+
+    // Busca mesas ao montar + polling a cada 10 segundos
     useEffect(() => {
-        // Busca imediatamente ao entrar no lobby
         buscarMesas();
-
-        // Depois atualiza a cada INTERVALO_ATUALIZAR ms
-        const intervalo = setInterval(buscarMesas, INTERVALO_ATUALIZAR);
-
-        // Cleanup: cancela o intervalo ao sair do lobby
+        const intervalo = setInterval(buscarMesas, INTERVALO_MESAS);
         return () => clearInterval(intervalo);
     }, [buscarMesas]);
 
 
-    // ----------------------------------------------------------------
-    // EFEITO: escuta eventos do Socket.io
-    //
-    // O servidor pode empurrar atualizações de mesas em tempo real.
-    // Isso complementa o polling (buscarMesas) com updates instantâneos.
-    // ----------------------------------------------------------------
+    // Busca ranking ao montar + atualiza a cada 60 segundos
+    // Intervalo maior que mesas pois o ranking muda menos frequentemente
+    useEffect(() => {
+        buscarRankingAPI();
+        const intervalo = setInterval(buscarRankingAPI, INTERVALO_RANKING);
+        return () => clearInterval(intervalo);
+    }, [buscarRankingAPI]);
+
+
+    // Atualizações de mesas em tempo real via Socket.io
     useEffect(() => {
         if (!socket) return;
-
-        // Quando o servidor avisa que uma mesa foi criada/atualizada
         socket.on('mesas_atualizadas', buscarMesas);
-
-        // Cleanup: remove o listener ao sair do lobby
         return () => socket.off('mesas_atualizadas', buscarMesas);
     }, [socket, buscarMesas]);
 
 
     // ----------------------------------------------------------------
-    // HANDLERS (funções que respondem a ações do usuário)
+    // Handlers
     // ----------------------------------------------------------------
 
-    // Entra em uma mesa pública diretamente
     function handleEntrarPublica(mesaId) {
         socket.emit('entrar_mesa', { mesaId });
         onEntrarMesa(mesaId);
     }
 
-    // Abre o modal de senha para mesa privada
     function handleClicarPrivada(mesaId) {
         setModalSenha(mesaId);
     }
 
-    // Confirma entrada em mesa privada com senha
     function handleConfirmarSenha(senha) {
         if (!modalSenha) return;
         socket.emit('entrar_mesa', { mesaId: modalSenha, senha });
@@ -195,92 +156,172 @@ export default function Lobby({ usuario, socket, onEntrarMesa }) {
         setModalSenha(null);
     }
 
-    // Mesa criada com sucesso — entra automaticamente
     function handleMesaCriada(mesaId) {
         setModalCriar(false);
         onEntrarMesa(mesaId);
     }
 
+    function handleLogout() {
+        signOut(getAuth());
+    }
+
 
     // ================================================================
     // RENDERIZAÇÃO
-    //
-    // O JSX descreve COMO a tela deve parecer.
-    // O React decide O QUE mudar no DOM quando o estado muda.
     // ================================================================
     return (
-        <div style={estilos.pagina}>
+        <div style={estilos.pagina} className="lobby-pagina">
 
-            {/* HEADER: avatar, nome e saldo do jogador */}
+            {/* CSS responsivo — media queries só funcionam em <style> */}
+            <style>{`
+                /* ---- Mobile (padrão) ---- */
+                .lobby-pagina {
+                    max-width: 480px;
+                }
+                .lobby-body {
+                    display: flex;
+                    flex-direction: column;
+                    flex: 1;
+                    overflow: hidden;
+                }
+                .lobby-esquerda {
+                    display: flex;
+                    flex-direction: column;
+                    flex: 1;
+                    overflow: hidden;
+                }
+                .lobby-direita {
+                    display: none;
+                }
+                .lobby-conteudo {
+                    flex: 1;
+                    overflow-y: auto;
+                    padding: 12px 14px 100px;
+                    -webkit-overflow-scrolling: touch;
+                }
+                .lobby-rodape {
+                    position: fixed;
+                    bottom: 0;
+                    left: 50%;
+                    transform: translateX(-50%);
+                    width: 100%;
+                    max-width: 480px;
+                    padding: 10px 14px max(14px, env(safe-area-inset-bottom));
+                    background: linear-gradient(to top, #0a0f1e 70%, transparent);
+                    z-index: 100;
+                    box-sizing: border-box;
+                }
+
+                /* ---- Desktop (768px+) ---- */
+                @media (min-width: 768px) {
+                    .lobby-pagina {
+                        max-width: 1200px !important;
+                    }
+                    .lobby-body {
+                        flex-direction: row;
+                    }
+                    .lobby-esquerda {
+                        flex: 1;
+                        border-right: 1px solid rgba(255,255,255,0.06);
+                        min-width: 0;
+                    }
+                    .lobby-direita {
+                        display: flex;
+                        flex-direction: column;
+                        width: 320px;
+                        flex-shrink: 0;
+                        background: #0d1424;
+                    }
+                    .lobby-conteudo {
+                        padding: 16px 20px 100px;
+                    }
+                    .lobby-rodape {
+                        max-width: 1200px;
+                        padding: 12px 20px max(16px, env(safe-area-inset-bottom));
+                    }
+                }
+
+                /* ---- Large desktop (1024px+) ---- */
+                @media (min-width: 1024px) {
+                    .lobby-direita {
+                        width: 380px;
+                    }
+                }
+            `}</style>
+
+            {/* ---- HEADER ---- */}
             <Header
                 usuario={usuario}
                 onAbrirLoja={() => setTabAtiva(TABS.LOJA)}
+                onAbrirCarteira={() => setTabAtiva(TABS.LOJA)}
+                onLogout={handleLogout}
             />
 
-            {/* TABS: navegação entre as seções do lobby */}
-            <Tabs
-                tabAtiva={tabAtiva}
-                onMudar={setTabAtiva}
-                qtdPublicas={mesasPublicas.length}
-                qtdPrivadas={mesasPrivadas.length}
-            />
+            {/* ---- CORPO ---- */}
+            <div className="lobby-body">
 
-            {/* CONTEÚDO: muda conforme a tab ativa */}
-            <div style={estilos.conteudo}>
+                {/* Coluna esquerda: tabs + conteúdo da tab */}
+                <div className="lobby-esquerda">
+                    <Tabs
+                        tabAtiva={tabAtiva}
+                        onMudar={setTabAtiva}
+                        qtdPublicas={mesasPublicas.length}
+                        qtdPrivadas={mesasPrivadas.length}
+                    />
 
-                {/* Mensagem de erro (se houver) */}
-                {erro && (
-                    <div style={estilos.erro}>
-                        <span>{erro}</span>
-                        <button
-                            onClick={buscarMesas}
-                            style={estilos.btnTentar}
-                        >
-                            Tentar novamente
-                        </button>
+                    <div className="lobby-conteudo">
+                        {erro && (
+                            <div style={estilos.erro}>
+                                <span>{erro}</span>
+                                <button onClick={buscarMesas} style={estilos.btnTentar}>
+                                    Tentar novamente
+                                </button>
+                            </div>
+                        )}
+
+                        {tabAtiva === TABS.PUBLICAS && (
+                            <ListaMesas
+                                mesas={mesasPublicas}
+                                carregando={carregando}
+                                privadas={false}
+                                onEntrar={handleEntrarPublica}
+                            />
+                        )}
+
+                        {tabAtiva === TABS.PRIVADAS && (
+                            <ListaMesas
+                                mesas={mesasPrivadas}
+                                carregando={carregando}
+                                privadas={true}
+                                onEntrar={handleClicarPrivada}
+                            />
+                        )}
+
+                        {/* No mobile, ranking aparece como tab normal */}
+                        {tabAtiva === TABS.RANKING && (
+                            <Ranking ranking={ranking} meuUid={usuario?.uid} />
+                        )}
+
+                        {tabAtiva === TABS.LOJA && (
+                            <Loja usuario={usuario} socket={socket} />
+                        )}
                     </div>
-                )}
+                </div>
 
-                {/* Tab: Mesas Públicas */}
-                {tabAtiva === TABS.PUBLICAS && (
-                    <ListaMesas
-                        mesas={mesasPublicas}
-                        carregando={carregando}
-                        privadas={false}
-                        onEntrar={handleEntrarPublica}
-                    />
-                )}
-
-                {/* Tab: Mesas Privadas */}
-                {tabAtiva === TABS.PRIVADAS && (
-                    <ListaMesas
-                        mesas={mesasPrivadas}
-                        carregando={carregando}
-                        privadas={true}
-                        onEntrar={handleClicarPrivada}
-                    />
-                )}
-
-                {/* Tab: Ranking */}
-                {tabAtiva === TABS.RANKING && (
-                    <Ranking
-                        ranking={ranking}
-                        meuUid={usuario?.uid}
-                    />
-                )}
-
-                {/* Tab: Loja */}
-                {tabAtiva === TABS.LOJA && (
-                    <Loja
-                        usuario={usuario}
-                        socket={socket}
-                    />
-                )}
+                {/* Coluna direita: ranking fixo (só desktop) */}
+                <div className="lobby-direita">
+                    <div style={estilos.direitaTitulo}>
+                        <span style={estilos.direitaTituloTexto}>🏆 Ranking</span>
+                    </div>
+                    <div style={estilos.direitaConteudo}>
+                        <Ranking ranking={ranking} meuUid={usuario?.uid} />
+                    </div>
+                </div>
 
             </div>
 
-            {/* BOTÃO CRIAR MESA: fixo no fundo da tela */}
-            <div style={estilos.rodape}>
+            {/* ---- BOTÃO CRIAR MESA ---- */}
+            <div className="lobby-rodape">
                 <button
                     onClick={() => setModalCriar(true)}
                     style={estilos.btnCriar}
@@ -290,7 +331,7 @@ export default function Lobby({ usuario, socket, onEntrarMesa }) {
                 </button>
             </div>
 
-            {/* MODAL: formulário para criar nova mesa */}
+            {/* ---- MODAIS ---- */}
             {modalCriar && (
                 <ModalCriarMesa
                     usuario={usuario}
@@ -300,7 +341,6 @@ export default function Lobby({ usuario, socket, onEntrarMesa }) {
                 />
             )}
 
-            {/* MODAL: pedir senha da mesa privada */}
             {modalSenha && (
                 <ModalSenha
                     onConfirmar={handleConfirmarSenha}
@@ -315,56 +355,40 @@ export default function Lobby({ usuario, socket, onEntrarMesa }) {
 
 // ================================================================
 // BLOCO 3: ESTILOS
-//
-// Definidos fora do componente para não recriar a cada render.
-// Usamos um objeto 'estilos' para organizar — como um mini CSS.
-//
-// Por que não usar um arquivo .css separado?
-//   Em projetos pequenos, manter estilos próximos do componente
-//   é mais fácil de manter. Quando o projeto crescer, podemos
-//   migrar para CSS Modules ou Tailwind.
 // ================================================================
 
 const estilos = {
 
-    // Container principal — ocupa a tela inteira no mobile
     pagina: {
         minHeight:     '100vh',
         background:    '#0a0f1e',
         color:         '#F8FAFC',
         display:       'flex',
         flexDirection: 'column',
-        maxWidth:      '480px',   // Mobile-first: limita a largura
-        margin:        '0 auto',  // Centraliza em telas maiores
+        margin:        '0 auto',
         fontFamily:    'sans-serif',
         position:      'relative',
     },
 
-    // Área de conteúdo com scroll
-    // paddingBottom: espaço para o botão "Criar Mesa" não cobrir o conteúdo
-    conteudo: {
-        flex:          1,
-        overflowY:     'auto',
-        padding:       '12px 14px 100px',
-        WebkitOverflowScrolling: 'touch', // scroll suave no iOS
+    direitaTitulo: {
+        padding:      '14px 16px',
+        borderBottom: '1px solid rgba(255,255,255,0.06)',
+        flexShrink:   0,
     },
 
-    // Rodapé fixo com o botão de criar mesa
-    rodape: {
-        position:      'fixed',
-        bottom:        0,
-        left:          '50%',
-        transform:     'translateX(-50%)',
-        width:         '100%',
-        maxWidth:      '480px',
-        padding:       '10px 14px',
-        // safe-area: respeita a barra home do iPhone
-        paddingBottom: 'max(14px, env(safe-area-inset-bottom))',
-        background:    'linear-gradient(to top, #0a0f1e 70%, transparent)',
-        zIndex:        100,
+    direitaTituloTexto: {
+        fontSize:   '14px',
+        fontWeight: '600',
+        color:      '#F8FAFC',
     },
 
-    // Botão principal de criar mesa
+    direitaConteudo: {
+        flex:      1,
+        overflowY: 'auto',
+        padding:   '12px 16px',
+        WebkitOverflowScrolling: 'touch',
+    },
+
     btnCriar: {
         width:          '100%',
         padding:        '14px',
@@ -379,12 +403,11 @@ const estilos = {
         alignItems:     'center',
         justifyContent: 'center',
         gap:            '8px',
-        // Feedback de toque
         WebkitTapHighlightColor: 'transparent',
         transition:     'opacity 0.15s',
+        fontFamily:     'sans-serif',
     },
 
-    // Box de erro
     erro: {
         background:    'rgba(239,68,68,0.1)',
         border:        '1px solid rgba(239,68,68,0.3)',
@@ -398,15 +421,15 @@ const estilos = {
         color:         '#FCA5A5',
     },
 
-    // Botão "Tentar novamente" dentro do erro
     btnTentar: {
-        background:    'rgba(239,68,68,0.2)',
-        border:        '1px solid rgba(239,68,68,0.4)',
-        borderRadius:  '6px',
-        color:         '#FCA5A5',
-        fontSize:      '12px',
-        padding:       '6px 12px',
-        cursor:        'pointer',
-        alignSelf:     'flex-start',
+        background:   'rgba(239,68,68,0.2)',
+        border:       '1px solid rgba(239,68,68,0.4)',
+        borderRadius: '6px',
+        color:        '#FCA5A5',
+        fontSize:     '12px',
+        padding:      '6px 12px',
+        cursor:       'pointer',
+        alignSelf:    'flex-start',
+        fontFamily:   'sans-serif',
     },
 };
