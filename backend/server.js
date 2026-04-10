@@ -69,7 +69,7 @@ const io = new Server(server, {
     cors: {
         // CLIENT_URL: URL do seu frontend React (ex: http://localhost:5173)
         // Em produção será a URL do Vercel
-        origin: process.env.CLIENT_URL || 'http://localhost:5173',
+       origin: ['https://poker-game-tawny-rho.vercel.app', 'http://localhost:5173'],
 
         // Métodos HTTP permitidos para o handshake inicial do WebSocket
         methods: ['GET', 'POST'],
