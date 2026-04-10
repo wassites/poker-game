@@ -11,10 +11,14 @@
                Esquerda: tabs + lista de mesas (flex: 1)
                Direita:  ranking fixo (320px)
 
-   RANKING (NOVO):
+   RANKING:
    Busca o ranking via GET /ranking do backend.
    Atualiza a cada 60 segundos automaticamente.
    Exibido na coluna direita (desktop) e na tab Ranking (mobile).
+
+   PERFIL (NOVO):
+   Modal que abre ao clicar em "Perfil" no menu do Header.
+   Permite editar nome, email, telefone, avatar e recuperar senha.
 
    PROPS:
      usuario      → { uid, nome, avatar, saldo, rankPontos, tema }
@@ -32,6 +36,7 @@ import Ranking        from './Ranking';
 import Loja           from './Loja';
 import ModalCriarMesa from './ModalCriarMesa';
 import ModalSenha     from './ModalSenha';
+import ModalPerfil    from './ModalPerfil';
 
 
 // ================================================================
@@ -45,9 +50,9 @@ const TABS = {
     LOJA:     'loja',
 };
 
-const SERVER_URL          = import.meta.env.VITE_SERVER_URL || 'http://localhost:3001';
-const INTERVALO_MESAS     = 10000; // atualiza mesas a cada 10 segundos
-const INTERVALO_RANKING   = 60000; // atualiza ranking a cada 60 segundos
+const SERVER_URL        = import.meta.env.VITE_SERVER_URL || 'http://localhost:3001';
+const INTERVALO_MESAS   = 10000; // atualiza mesas a cada 10 segundos
+const INTERVALO_RANKING = 60000; // atualiza ranking a cada 60 segundos
 
 
 // ================================================================
@@ -61,17 +66,20 @@ export default function Lobby({ usuario, socket, onEntrarMesa }) {
     const [mesasPrivadas, setMesasPrivadas] = useState([]);
 
     // ranking: array de jogadores com posicao, nome, vitorias, fichasLiquidas, etc.
-    // setRanking: atualizado pela função buscarRanking abaixo
     const [ranking,       setRanking      ] = useState([]);
 
     const [modalCriar,    setModalCriar   ] = useState(false);
     const [modalSenha,    setModalSenha   ] = useState(null);
+    const [modalPerfil,   setModalPerfil  ] = useState(false);
     const [carregando,    setCarregando   ] = useState(true);
     const [erro,          setErro         ] = useState(null);
 
 
     // ----------------------------------------------------------------
     // Busca mesas do servidor via HTTP GET /mesas
+    //
+    // useCallback com [] — nunca recria a função entre renders.
+    // Necessário para não causar loop no useEffect abaixo.
     // ----------------------------------------------------------------
     const buscarMesas = useCallback(async () => {
         try {
@@ -93,11 +101,8 @@ export default function Lobby({ usuario, socket, onEntrarMesa }) {
     // ----------------------------------------------------------------
     // Busca ranking do servidor via HTTP GET /ranking
     //
-    // NOVO: chama a rota que criamos no server.js.
     // O backend busca os dados do Firestore (salvos pelo game-manager)
     // e retorna os top 20 jogadores ordenados por fichasLiquidas.
-    //
-    // useCallback com [] — nunca recria a função entre renders.
     // ----------------------------------------------------------------
     const buscarRankingAPI = useCallback(async () => {
         try {
@@ -120,7 +125,7 @@ export default function Lobby({ usuario, socket, onEntrarMesa }) {
 
 
     // Busca ranking ao montar + atualiza a cada 60 segundos
-    // Intervalo maior que mesas pois o ranking muda menos frequentemente
+    // Intervalo maior pois o ranking muda menos frequentemente
     useEffect(() => {
         buscarRankingAPI();
         const intervalo = setInterval(buscarRankingAPI, INTERVALO_RANKING);
@@ -250,10 +255,15 @@ export default function Lobby({ usuario, socket, onEntrarMesa }) {
             `}</style>
 
             {/* ---- HEADER ---- */}
+            {/*
+                NOVO: passa onAbrirPerfil para o Header.
+                O Header repassa para o MenuDropdown → item "Perfil".
+            */}
             <Header
                 usuario={usuario}
-                onAbrirLoja={() => setTabAtiva(TABS.LOJA)}
+                onAbrirLoja={()   => setTabAtiva(TABS.LOJA)}
                 onAbrirCarteira={() => setTabAtiva(TABS.LOJA)}
+                onAbrirPerfil={()  => setModalPerfil(true)}
                 onLogout={handleLogout}
             />
 
@@ -348,6 +358,20 @@ export default function Lobby({ usuario, socket, onEntrarMesa }) {
                 />
             )}
 
+            {/* Modal de Perfil — abre ao clicar em "Perfil" no menu do Header */}
+            {modalPerfil && (
+                <ModalPerfil
+                    usuario={usuario}
+                    onFechar={() => setModalPerfil(false)}
+                    onAtualizar={(novoUsuario) => {
+                        // Aqui poderíamos atualizar o estado do usuário no App.jsx
+                        // via prop callback. Por enquanto apenas fecha o modal.
+                        console.log('Perfil atualizado:', novoUsuario);
+                        setModalPerfil(false);
+                    }}
+                />
+            )}
+
         </div>
     );
 }
@@ -359,6 +383,7 @@ export default function Lobby({ usuario, socket, onEntrarMesa }) {
 
 const estilos = {
 
+    // Container principal — ocupa a tela inteira no mobile
     pagina: {
         minHeight:     '100vh',
         background:    '#0a0f1e',
@@ -370,6 +395,7 @@ const estilos = {
         position:      'relative',
     },
 
+    // Título da coluna direita (desktop)
     direitaTitulo: {
         padding:      '14px 16px',
         borderBottom: '1px solid rgba(255,255,255,0.06)',
@@ -382,6 +408,7 @@ const estilos = {
         color:      '#F8FAFC',
     },
 
+    // Conteúdo da coluna direita com scroll
     direitaConteudo: {
         flex:      1,
         overflowY: 'auto',
@@ -389,6 +416,7 @@ const estilos = {
         WebkitOverflowScrolling: 'touch',
     },
 
+    // Botão principal de criar mesa
     btnCriar: {
         width:          '100%',
         padding:        '14px',
@@ -408,6 +436,7 @@ const estilos = {
         fontFamily:     'sans-serif',
     },
 
+    // Box de erro
     erro: {
         background:    'rgba(239,68,68,0.1)',
         border:        '1px solid rgba(239,68,68,0.3)',
@@ -421,6 +450,7 @@ const estilos = {
         color:         '#FCA5A5',
     },
 
+    // Botão "Tentar novamente" dentro do erro
     btnTentar: {
         background:   'rgba(239,68,68,0.2)',
         border:       '1px solid rgba(239,68,68,0.4)',
