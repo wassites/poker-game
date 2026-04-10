@@ -7,7 +7,7 @@
      → Carregando : verificando sessão do Firebase
      → Auth       : tela de login / cadastro
      → Lobby      : tela inicial com lista de mesas
-     → Jogo       : mesa de poker ativa
+     → Jogo       : mesa de poker ativa (componente Game)
 
    TAMBÉM É RESPONSÁVEL POR:
      → Verificar se o jogador já está logado (Firebase Auth)
@@ -19,7 +19,7 @@
    1. App monta → verifica sessão Firebase (onAuthStateChanged)
    2. Sem sessão → mostra tela de Auth (Login/Cadastro)
    3. Com sessão → busca perfil no Firestore → conecta Socket.io → Lobby
-   4. Jogador entra em mesa → mostra tela de Jogo
+   4. Jogador entra em mesa → mostra tela de Jogo (componente Game)
    5. Jogador sai da mesa → volta para Lobby
    6. Jogador faz logout → volta para Auth
 ================================================================ */
@@ -35,6 +35,11 @@ import { auth, db } from './services/firebase-config';
 // Importa as telas
 import Auth  from './pages/Auth/index';
 import Lobby from './pages/Lobby/index';
+
+// Game: componente da mesa de poker
+// Substituiu o placeholder antigo ("Tela do jogo em construção...")
+// Recebe: socket, usuario, mesaId, onSair
+import Game from './pages/Game/index';
 
 
 // ================================================================
@@ -86,6 +91,43 @@ export default function App() {
 
 
     // ----------------------------------------------------------------
+    // Conecta Socket.io após autenticação bem-sucedida
+    //
+    // useCallback: memoriza a função entre renders.
+    // DEVE ser declarada ANTES do useEffect que a usa —
+    // diferente de funções normais (function), useCallback não sofre
+    // "hoisting" (elevação) e precisa estar declarada antes de ser chamada.
+    //
+    // Só conecta se ainda não estiver conectado.
+    // Emite 'autenticar' logo após conectar para o servidor
+    // saber quem é o jogador.
+    // ----------------------------------------------------------------
+    const conectarSocket = useCallback((perfil) => {
+        if (socket.connected) return;
+
+        socket.connect();
+
+        // 'once' escuta apenas uma vez — não acumula listeners
+        socket.once('connect', () => {
+            console.log('✅ Conectado ao servidor:', socket.id);
+            socket.emit('autenticar', {
+                uid:    perfil.uid,
+                nome:   perfil.nome,
+                avatar: perfil.avatar || '',
+            });
+        });
+
+        socket.on('disconnect', (motivo) => {
+            console.warn('❌ Desconectado:', motivo);
+        });
+
+        socket.on('erro', ({ mensagem }) => {
+            console.error('Erro servidor:', mensagem);
+        });
+    }, []); // Array vazio: socket é criado fora do componente, nunca muda
+
+
+    // ----------------------------------------------------------------
     // EFEITO: monitora sessão do Firebase
     //
     // onAuthStateChanged: dispara toda vez que o estado muda:
@@ -133,39 +175,7 @@ export default function App() {
         // Cleanup: cancela o listener ao desmontar
         return () => cancelar();
 
-    }, []); // Array vazio: roda só uma vez ao montar
-
-
-    // ----------------------------------------------------------------
-    // Conecta Socket.io após autenticação bem-sucedida
-    //
-    // Só conecta se ainda não estiver conectado.
-    // Emite 'autenticar' logo após conectar para o servidor
-    // saber quem é o jogador.
-    // ----------------------------------------------------------------
-    function conectarSocket(perfil) {
-        if (socket.connected) return;
-
-        socket.connect();
-
-        // 'once' escuta apenas uma vez — não acumula listeners
-        socket.once('connect', () => {
-            console.log('✅ Conectado ao servidor:', socket.id);
-            socket.emit('autenticar', {
-                uid:    perfil.uid,
-                nome:   perfil.nome,
-                avatar: perfil.avatar || '',
-            });
-        });
-
-        socket.on('disconnect', (motivo) => {
-            console.warn('❌ Desconectado:', motivo);
-        });
-
-        socket.on('erro', ({ mensagem }) => {
-            console.error('Erro servidor:', mensagem);
-        });
-    }
+    }, [conectarSocket]); // conectarSocket é estável (useCallback com [])
 
 
     // ----------------------------------------------------------------
@@ -175,7 +185,7 @@ export default function App() {
         setUsuario(perfil);
         conectarSocket(perfil);
         setTela(TELAS.LOBBY);
-    }, []);
+    }, [conectarSocket]); // depende de conectarSocket
 
 
     // ----------------------------------------------------------------
@@ -230,23 +240,23 @@ export default function App() {
         return <Auth onAutenticado={handleAutenticado} />;
     }
 
-    // ---- Mesa de poker (placeholder até Game/index.jsx ficar pronto) ----
+    // ---- Mesa de poker ----
+    // Antes era um placeholder ("Tela do jogo em construção...").
+    // Agora usa o componente Game que criamos em pages/Game/index.jsx.
+    //
+    // Props passadas para o Game:
+    //   socket  → a conexão Socket.io para enviar e receber eventos
+    //   usuario → dados do jogador logado (nome, saldo, uid, etc.)
+    //   mesaId  → ID da mesa que o jogador entrou
+    //   onSair  → função que volta ao Lobby quando o jogador sair
     if (tela === TELAS.JOGO) {
         return (
-            <div style={estilos.telaJogo}>
-                <div style={estilos.jogoCard}>
-                    <span style={{ fontSize: '48px' }}>🃏</span>
-                    <p style={{ color: '#F8FAFC', fontSize: '15px', margin: '12px 0 4px', fontWeight: '600' }}>
-                        Mesa: {mesaAtual}
-                    </p>
-                    <p style={{ color: 'rgba(255,255,255,0.35)', fontSize: '13px' }}>
-                        Tela do jogo em construção...
-                    </p>
-                    <button onClick={handleSairMesa} style={estilos.btnSair}>
-                        ← Voltar ao Lobby
-                    </button>
-                </div>
-            </div>
+            <Game
+                socket={socket}
+                usuario={usuario}
+                mesaId={mesaAtual}
+                onSair={handleSairMesa}
+            />
         );
     }
 
@@ -329,36 +339,16 @@ const estilos = {
         textAlign: 'center',
     },
 
-    // Tela do jogo (placeholder)
-    telaJogo: {
-        minHeight:      '100vh',
-        background:     '#0a0f1e',
-        display:        'flex',
-        alignItems:     'center',
-        justifyContent: 'center',
-        fontFamily:     'sans-serif',
-    },
-
-    jogoCard: {
-        display:        'flex',
-        flexDirection:  'column',
-        alignItems:     'center',
-        gap:            '8px',
-        padding:        '32px',
-        background:     '#111827',
-        borderRadius:   '16px',
-        border:         '1px solid rgba(255,255,255,0.08)',
-    },
-
-    btnSair: {
-        marginTop:    '16px',
-        padding:      '10px 20px',
-        background:   'rgba(255,255,255,0.06)',
-        border:       '1px solid rgba(255,255,255,0.1)',
-        borderRadius: '8px',
-        color:        'rgba(255,255,255,0.6)',
-        fontSize:     '14px',
-        cursor:       'pointer',
-        fontFamily:   'sans-serif',
-    },
+    // ----------------------------------------------------------------
+    // NOTA: Os estilos telaJogo, jogoCard e btnSair foram removidos.
+    //
+    // Antes existiam para o placeholder da tela do jogo:
+    //   telaJogo → container centralizado na tela
+    //   jogoCard → card com mensagem "em construção"
+    //   btnSair  → botão de voltar ao lobby
+    //
+    // Agora o componente Game/index.jsx tem seus próprios estilos
+    // e cuida de toda a interface da mesa de poker.
+    // Manter estilos sem uso causaria confusão — por isso removemos.
+    // ----------------------------------------------------------------
 };
