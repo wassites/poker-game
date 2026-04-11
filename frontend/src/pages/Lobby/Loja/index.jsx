@@ -1,17 +1,14 @@
 /* ================================================================
    ARQUIVO: frontend/src/pages/Lobby/Loja/index.jsx
 
-   CONCEITO GERAL:
-   Página da loja onde o jogador pode:
-     → Comprar pacotes de Bitchager (₿C) com dinheiro real
-     → Comprar temas visuais para as cartas com ₿C
-
-   RESPONSIVIDADE (NOVO):
-   Mobile  → tabs para alternar entre ₿C e Temas
-   Desktop → duas colunas lado a lado, sem precisar de tabs
+   MUDANÇAS DESTA VERSÃO:
+     → Passa usuario e socket para PacotesBC (integração real MP)
+     → onFeedback centralizado na Loja e repassado para filhos
+     → TemasCartas recebe temas comprados do perfil real
+     → Saldo exibe real + bônus separados
 
    PROPS:
-     usuario → { uid, nome, saldo, tema }
+     usuario → { uid, nome, saldo, saldoBonus, tema, temasComprados }
      socket  → instância do Socket.io
 ================================================================ */
 
@@ -32,8 +29,12 @@ export default function Loja({ usuario, socket }) {
 
     function mostrarFeedback(tipo, mensagem) {
         setFeedback({ tipo, mensagem });
-        setTimeout(() => setFeedback(null), 3000);
+        setTimeout(() => setFeedback(null), 4000);
     }
+
+    // Saldo total (real + bônus) para exibição
+    const saldoTotal  = (usuario?.saldo || 0) + (usuario?.saldoBonus || 0);
+    const temBonus    = (usuario?.saldoBonus || 0) > 0;
 
     return (
         <div style={estilos.container}>
@@ -48,21 +49,26 @@ export default function Loja({ usuario, socket }) {
                 }
             `}</style>
 
-            {/* Cabeçalho */}
+            {/* ---- Cabeçalho ---- */}
             <div style={estilos.cabecalho}>
                 <div>
                     <h2 style={estilos.titulo}>Loja</h2>
                     <p style={estilos.subtitulo}>
-                        Seu saldo:{' '}
+                        Saldo:{' '}
                         <span style={{ color: '#F59E0B', fontWeight: '700' }}>
-                            ₿C {Number(usuario?.saldo || 0).toLocaleString('pt-BR')}
+                            ₿C {Number(saldoTotal).toLocaleString('pt-BR')}
                         </span>
+                        {temBonus && (
+                            <span style={{ color: '#F59E0B', fontSize: '11px', opacity: 0.7 }}>
+                                {' '}(₿C {Number(usuario.saldoBonus).toLocaleString('pt-BR')} bônus)
+                            </span>
+                        )}
                     </p>
                 </div>
                 <span style={{ fontSize: '36px', opacity: 0.6 }}>🏪</span>
             </div>
 
-            {/* Feedback */}
+            {/* ---- Feedback ---- */}
             {feedback && (
                 <div style={{
                     ...estilos.feedback,
@@ -74,7 +80,7 @@ export default function Loja({ usuario, socket }) {
                 </div>
             )}
 
-            {/* Tabs (mobile) */}
+            {/* ---- Tabs (mobile) ---- */}
             <div className="loja-tabs">
                 {TABS_LOJA.map(tab => {
                     const ativa = tabAtiva === tab.id;
@@ -96,17 +102,17 @@ export default function Loja({ usuario, socket }) {
                 })}
             </div>
 
-            {/* Corpo */}
+            {/* ---- Corpo ---- */}
             <div className="loja-corpo">
 
                 {/* Coluna ₿C */}
                 <div className="loja-col" style={{ display: tabAtiva === 'bc' ? 'block' : 'none' }}>
                     <p style={estilos.colunaTitle}>💰 Pacotes Bitchager</p>
                     <PacotesBC
-                        saldoAtual={usuario?.saldo || 0}
-                        onComprar={(pacote) => {
-                            mostrarFeedback('sucesso', `₿C ${pacote.valorBC.toLocaleString('pt-BR')} adicionados! (simulado)`);
-                        }}
+                        saldoAtual={saldoTotal}
+                        usuario={usuario}
+                        socket={socket}
+                        onFeedback={mostrarFeedback}
                     />
                 </div>
 
@@ -114,10 +120,11 @@ export default function Loja({ usuario, socket }) {
                 <div className="loja-col" style={{ display: tabAtiva === 'temas' ? 'block' : 'none' }}>
                     <p style={estilos.colunaTitle}>🎨 Temas das Cartas</p>
                     <TemasCartas
-                        saldoAtual={usuario?.saldo || 0}
+                        saldoAtual={saldoTotal}
                         temaAtual={usuario?.tema || 'classico'}
+                        temasComprados={usuario?.temasComprados || []}
                         onComprar={(tema) => {
-                            if ((usuario?.saldo || 0) < tema.preco) {
+                            if (saldoTotal < tema.preco) {
                                 mostrarFeedback('erro', 'Saldo insuficiente de ₿C.');
                                 return;
                             }
@@ -136,6 +143,7 @@ export default function Loja({ usuario, socket }) {
         </div>
     );
 }
+
 
 const estilos = {
     container:   { display: 'flex', flexDirection: 'column', gap: '14px' },

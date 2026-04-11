@@ -2,329 +2,391 @@
    ARQUIVO: frontend/src/pages/Lobby/Loja/PacotesBC.jsx
 
    CONCEITO GERAL:
-   Exibe os pacotes de Bitchager disponíveis para compra.
-   O jogador escolhe um pacote e paga com PIX ou cartão.
+   O jogador escolhe quanto quer depositar:
+     → Valores predefinidos: R$ 1, R$ 10, R$ 20, R$ 50, R$ 100
+     → Ou digita qualquer valor no campo livre
 
-   SOBRE OS PACOTES:
-   Cada pacote tem:
-     → valorBC   : quantidade de ₿C recebida
-     → precoReal : preço em reais (R$)
-     → bonus     : ₿C extras incluídos (ex: +20%)
-     → destaque  : true = "Mais popular" (destaque visual)
+   CONVERSÃO:
+     R$ 1,00  =  ₿C 1.000  (na carteira)
+     ₿C 1.000 =  1 ficha    (na mesa de jogo)
 
-   INTEGRAÇÃO COM PAGAMENTO:
-   Por enquanto os botões simulam a compra.
-   Quando integrar com Stripe ou PIX:
-     1. Chame a API do backend com o pacoteId
-     2. Backend cria a sessão de pagamento
-     3. Redireciona para o checkout
-     4. Webhook confirma o pagamento e credita o ₿C
+   Exemplo com R$ 20:
+     Paga: R$ 22,00 (R$ 20 + 10% de taxa)
+     Recebe: ₿C 20.000 na carteira
+     Na mesa aparece como: 20 fichas
 
    PROPS:
      saldoAtual → number: saldo atual do jogador em ₿C
-     onComprar  → function(pacote): chamada ao confirmar compra
+     usuario    → object: { uid, nome }
+     socket     → Socket.io
+     onFeedback → fn(tipo, msg)
 ================================================================ */
 
-import { useState } from 'react';
+import { useState, useEffect, useMemo } from 'react';
+import { calcularDeposito, fmt, fmtBC, TAXAS, LIMITES } from '../../Wallet/walletUtils';
 
 
 // ================================================================
-// BLOCO 1: CATÁLOGO DE PACOTES
-//
-// valorBCBase : ₿C sem bônus
-// bonus       : ₿C extras de bônus
-// valorBC     : total recebido (base + bonus)
-// precoReal   : preço em reais
+// BLOCO 1: VALORES PREDEFINIDOS
 // ================================================================
 
-const PACOTES = [
-    {
-        id:          'starter',
-        nome:        'Starter',
-        valorBCBase: 1000,
-        bonus:       0,
-        valorBC:     1000,
-        precoReal:   4.90,
-        destaque:    false,
-        cor:         '#3B82F6',
-        icone:       '🃏',
-        descricao:   'Para dar os primeiros passos',
-    },
-    {
-        id:          'popular',
-        nome:        'Popular',
-        valorBCBase: 5000,
-        bonus:       1000,
-        valorBC:     6000,
-        precoReal:   19.90,
-        destaque:    true,
-        cor:         '#7C3AED',
-        icone:       '⭐',
-        descricao:   '+1.000 ₿C de bônus incluído',
-    },
-    {
-        id:          'pro',
-        nome:        'Pro',
-        valorBCBase: 15000,
-        bonus:       7500,
-        valorBC:     22500,
-        precoReal:   49.90,
-        destaque:    false,
-        cor:         '#D97706',
-        icone:       '💎',
-        descricao:   '+7.500 ₿C de bônus incluído',
-    },
-    {
-        id:          'whale',
-        nome:        'Whale',
-        valorBCBase: 50000,
-        bonus:       30000,
-        valorBC:     80000,
-        precoReal:   149.90,
-        destaque:    false,
-        cor:         '#EF4444',
-        icone:       '🐋',
-        descricao:   '+30.000 ₿C de bônus incluído',
-    },
+const VALORES_RAPIDOS = [
+    { brl: 1,   label: 'R$ 1',   fichas: '1'   },
+    { brl: 10,  label: 'R$ 10',  fichas: '10'  },
+    { brl: 20,  label: 'R$ 20',  fichas: '20'  },
+    { brl: 50,  label: 'R$ 50',  fichas: '50'  },
+    { brl: 100, label: 'R$ 100', fichas: '100' },
 ];
-
-// Formata número com separador de milhar
-function fmt(n) {
-    return Number(n).toLocaleString('pt-BR');
-}
-
-// Calcula o valor por ₿C de cada pacote (custo-benefício)
-function valorPorBC(pacote) {
-    return (pacote.precoReal / pacote.valorBC * 100).toFixed(3);
-}
 
 
 // ================================================================
 // BLOCO 2: COMPONENTE PRINCIPAL
 // ================================================================
 
-export default function PacotesBC({ saldoAtual, onComprar }) {
+export default function PacotesBC({ saldoAtual, usuario, socket, onFeedback }) {
 
-    // Pacote selecionado para confirmar
-    const [selecionado, setSelecionado] = useState(null);
+    const [valorBRL,   setValorBRL  ] = useState('');
+    const [metodo,     setMetodo    ] = useState('pix');
+    const [etapa,      setEtapa     ] = useState('selecao'); // selecao | aguardando | qrcode | sucesso
+    const [qrCode,     setQrCode    ] = useState(null);
+    const [pixCopia,   setPixCopia  ] = useState(null);
+    const [copiado,    setCopiado   ] = useState(false);
+    const [erroValor,  setErroValor ] = useState('');
 
-    // Estado de compra em andamento
-    const [comprando, setComprando] = useState(false);
+    // Valor numérico limpo
+    const valorNum = parseFloat(valorBRL) || 0;
+
+    // Cálculo em tempo real
+    const calculo = useMemo(() => {
+        if (!valorNum || valorNum < LIMITES.DEPOSITO_MIN_BRL) return null;
+        return calcularDeposito(valorNum);
+    }, [valorNum]);
+
+    // Fichas de mesa = ₿C / 1000
+    const fichasMesa = calculo ? Math.floor(calculo.bcRecebido / 1000) : 0;
 
 
     // ----------------------------------------------------------------
-    // Confirma a compra do pacote selecionado
+    // Escuta eventos do socket
     // ----------------------------------------------------------------
-    async function handleConfirmar() {
-        if (!selecionado || comprando) return;
-        setComprando(true);
+    useEffect(() => {
+        if (!socket) return;
 
-        // Simula delay de processamento (substituir por chamada real)
-        await new Promise(r => setTimeout(r, 1200));
+        socket.on('wallet:deposito_confirmado', ({ bcCreditar }) => {
+            setEtapa('sucesso');
+            onFeedback?.('sucesso', `✅ ₿C ${fmtBC(bcCreditar)} creditados! (${Math.floor(bcCreditar / 1000)} fichas)`);
+            setTimeout(() => {
+                setEtapa('selecao');
+                setValorBRL('');
+                setQrCode(null);
+                setPixCopia(null);
+            }, 3000);
+        });
 
-        onComprar(selecionado);
-        setSelecionado(null);
-        setComprando(false);
+        socket.on('wallet:deposito_iniciado', (data) => {
+            if (data.qrCode)        setQrCode(data.qrCode);
+            if (data.pixCopiaECola) setPixCopia(data.pixCopiaECola);
+            setEtapa('qrcode');
+        });
+
+        return () => {
+            socket.off('wallet:deposito_confirmado');
+            socket.off('wallet:deposito_iniciado');
+        };
+    }, [socket, onFeedback]);
+
+
+    // ----------------------------------------------------------------
+    // Seleciona valor rápido
+    // ----------------------------------------------------------------
+    function handleValorRapido(brl) {
+        setValorBRL(String(brl));
+        setErroValor('');
+    }
+
+
+    // ----------------------------------------------------------------
+    // Inicia pagamento
+    // ----------------------------------------------------------------
+    function handleComprar() {
+        if (!valorNum || valorNum < LIMITES.DEPOSITO_MIN_BRL) {
+            setErroValor(`Valor mínimo: R$ ${fmt(LIMITES.DEPOSITO_MIN_BRL)}`);
+            return;
+        }
+        if (valorNum > LIMITES.DEPOSITO_MAX_BRL) {
+            setErroValor(`Valor máximo: R$ ${fmt(LIMITES.DEPOSITO_MAX_BRL)}`);
+            return;
+        }
+        if (!calculo || !socket) return;
+
+        setEtapa('aguardando');
+
+        socket.emit('wallet:depositar', {
+            uid:        usuario?.uid,
+            valorBRL:   calculo.valorBRL,
+            taxaBRL:    calculo.taxaBRL,
+            bcEsperado: calculo.bcRecebido,
+            pin:        null,
+            metodo,
+        });
+    }
+
+
+    // ----------------------------------------------------------------
+    // Copia PIX
+    // ----------------------------------------------------------------
+    function handleCopiarPix() {
+        if (!pixCopia) return;
+        navigator.clipboard.writeText(pixCopia).then(() => {
+            setCopiado(true);
+            setTimeout(() => setCopiado(false), 2000);
+        });
+    }
+
+    function handleCancelar() {
+        setEtapa('selecao');
+        setQrCode(null);
+        setPixCopia(null);
     }
 
 
     // ================================================================
-    // RENDERIZAÇÃO
+    // AGUARDANDO
+    // ================================================================
+    if (etapa === 'aguardando') {
+        return (
+            <div style={estilos.container}>
+                <div style={estilos.estadoBox}>
+                    <span style={{ fontSize: '36px' }}>⏳</span>
+                    <p style={estilos.estadoTitulo}>Gerando pagamento...</p>
+                    <p style={estilos.estadoSub}>Conectando ao Mercado Pago</p>
+                </div>
+            </div>
+        );
+    }
+
+
+    // ================================================================
+    // QR CODE PIX
+    // ================================================================
+    if (etapa === 'qrcode') {
+        return (
+            <div style={estilos.container}>
+                <div style={estilos.qrcodeBox}>
+                    <p style={estilos.qrcodeTitulo}>📱 Pague com PIX</p>
+                    <p style={estilos.qrcodeSub}>Escaneie o QR Code ou copie o código</p>
+
+                    {qrCode ? (
+                        <img
+                            src={`data:image/png;base64,${qrCode}`}
+                            alt="QR Code PIX"
+                            style={estilos.qrcodeImg}
+                        />
+                    ) : (
+                        <div style={estilos.qrcodePlaceholder}>
+                            <span style={{ fontSize: '48px' }}>📷</span>
+                            <p style={{ fontSize: '12px', color: 'rgba(255,255,255,0.4)', margin: '8px 0 0' }}>
+                                Carregando QR Code...
+                            </p>
+                        </div>
+                    )}
+
+                    <div style={estilos.qrcodeResumo}>
+                        <span style={{ color: 'rgba(255,255,255,0.5)', fontSize: '13px' }}>
+                            ₿C {fmtBC(calculo?.bcRecebido || 0)} · {fichasMesa} fichas
+                        </span>
+                        <span style={{ color: '#F59E0B', fontWeight: '700', fontSize: '15px' }}>
+                            R$ {fmt(calculo?.totalBRL || 0)}
+                        </span>
+                    </div>
+
+                    {pixCopia && (
+                        <button onClick={handleCopiarPix} style={estilos.btnCopiarPix}>
+                            {copiado ? '✓ Copiado!' : '📋 Copiar código PIX'}
+                        </button>
+                    )}
+
+                    <p style={estilos.qrcodeAviso}>
+                        ₿C creditados automaticamente após o pagamento
+                    </p>
+
+                    <button onClick={handleCancelar} style={estilos.btnCancelarQr}>
+                        Cancelar
+                    </button>
+                </div>
+            </div>
+        );
+    }
+
+
+    // ================================================================
+    // SUCESSO
+    // ================================================================
+    if (etapa === 'sucesso') {
+        return (
+            <div style={estilos.container}>
+                <div style={estilos.estadoBox}>
+                    <span style={{ fontSize: '48px' }}>🎉</span>
+                    <p style={estilos.estadoTitulo}>Pagamento confirmado!</p>
+                    <p style={estilos.estadoSub}>
+                        {fichasMesa} fichas adicionadas à sua carteira
+                    </p>
+                </div>
+            </div>
+        );
+    }
+
+
+    // ================================================================
+    // SELEÇÃO PRINCIPAL
     // ================================================================
     return (
         <div style={estilos.container}>
 
-            {/* ---- Aviso sobre a moeda ---- */}
+            {/* ---- Explicação da conversão ---- */}
             <div style={estilos.avisoMoeda}>
-                <span style={{ fontSize: '16px' }}>ℹ️</span>
+                <span style={{ fontSize: '14px' }}>ℹ️</span>
                 <p style={estilos.avisoTexto}>
-                    Bitchager (₿C) é a moeda do jogo. No futuro será
-                    uma criptomoeda trocável por dinheiro real.
+                    R$ 1,00 = <strong style={{ color: '#F59E0B' }}>₿C 1.000</strong> = <strong style={{ color: '#A78BFA' }}>1 ficha</strong> na mesa
+                    · Taxa: {TAXAS.DEPOSITO * 100}% · Saque a qualquer momento
                 </p>
             </div>
 
-            {/* ---- Grid de pacotes ---- */}
-            <div style={estilos.grid}>
-                {PACOTES.map(pacote => {
-                    const estaSelecionado = selecionado?.id === pacote.id;
-                    return (
-                        <CardPacote
-                            key={pacote.id}
-                            pacote={pacote}
-                            selecionado={estaSelecionado}
-                            onSelecionar={() => setSelecionado(
-                                estaSelecionado ? null : pacote
-                            )}
-                        />
-                    );
-                })}
-            </div>
-
-            {/* ---- Painel de confirmação ---- */}
-            {selecionado && (
-                <div style={estilos.confirmacao}>
-
-                    {/* Resumo do pacote */}
-                    <div style={estilos.resumo}>
-                        <div style={estilos.resumoLinha}>
-                            <span style={estilos.resumoLabel}>Pacote</span>
-                            <span style={estilos.resumoValor}>
-                                {selecionado.icone} {selecionado.nome}
-                            </span>
-                        </div>
-                        <div style={estilos.resumoLinha}>
-                            <span style={estilos.resumoLabel}>₿C base</span>
-                            <span style={estilos.resumoValor}>
-                                ₿C {fmt(selecionado.valorBCBase)}
-                            </span>
-                        </div>
-                        {selecionado.bonus > 0 && (
-                            <div style={estilos.resumoLinha}>
-                                <span style={estilos.resumoLabel}>Bônus</span>
-                                <span style={{ ...estilos.resumoValor, color: '#22C55E' }}>
-                                    + ₿C {fmt(selecionado.bonus)}
+            {/* ---- Valores rápidos ---- */}
+            <div>
+                <p style={estilos.secaoLabel}>Valores rápidos</p>
+                <div style={estilos.valoresRapidos}>
+                    {VALORES_RAPIDOS.map(v => {
+                        const ativo = valorNum === v.brl;
+                        return (
+                            <button
+                                key={v.brl}
+                                onClick={() => handleValorRapido(v.brl)}
+                                style={{
+                                    ...estilos.btnRapido,
+                                    background: ativo ? 'rgba(245,158,11,0.15)' : 'rgba(255,255,255,0.05)',
+                                    border:     ativo ? '1px solid rgba(245,158,11,0.50)' : '1px solid rgba(255,255,255,0.08)',
+                                    color:      ativo ? '#F59E0B' : 'rgba(255,255,255,0.6)',
+                                }}
+                            >
+                                <span style={{ fontSize: '13px', fontWeight: '700' }}>{v.label}</span>
+                                <span style={{ fontSize: '10px', color: ativo ? '#F59E0B' : 'rgba(255,255,255,0.3)' }}>
+                                    {v.fichas} fichas
                                 </span>
-                            </div>
-                        )}
-                        <div style={estilos.separador} />
-                        <div style={estilos.resumoLinha}>
-                            <span style={{ ...estilos.resumoLabel, color: '#F8FAFC', fontWeight: '600' }}>
-                                Total ₿C
-                            </span>
-                            <span style={{ ...estilos.resumoValor, color: '#F59E0B', fontSize: '16px' }}>
-                                ₿C {fmt(selecionado.valorBC)}
-                            </span>
-                        </div>
-                        <div style={estilos.resumoLinha}>
-                            <span style={{ ...estilos.resumoLabel, color: '#F8FAFC', fontWeight: '600' }}>
-                                Valor
-                            </span>
-                            <span style={{ ...estilos.resumoValor, color: '#F8FAFC', fontSize: '16px' }}>
-                                R$ {selecionado.precoReal.toFixed(2).replace('.', ',')}
-                            </span>
-                        </div>
-                        <div style={estilos.resumoLinha}>
-                            <span style={estilos.resumoLabel}>Saldo após compra</span>
-                            <span style={{ ...estilos.resumoValor, color: '#22C55E' }}>
-                                ₿C {fmt(saldoAtual + selecionado.valorBC)}
-                            </span>
-                        </div>
-                    </div>
+                            </button>
+                        );
+                    })}
+                </div>
+            </div>
 
-                    {/* Métodos de pagamento */}
-                    <p style={estilos.labelPagamento}>Pagar com</p>
-                    <div style={estilos.metodosPagamento}>
-                        <BotaoPagamento icone="📱" label="PIX"     destaque />
-                        <BotaoPagamento icone="💳" label="Cartão"  />
-                    </div>
-
-                    {/* Botão confirmar */}
-                    <button
-                        onClick={handleConfirmar}
-                        disabled={comprando}
-                        style={{
-                            ...estilos.btnConfirmar,
-                            background: selecionado.cor,
-                            opacity:    comprando ? 0.7 : 1,
-                            cursor:     comprando ? 'not-allowed' : 'pointer',
+            {/* ---- Campo livre ---- */}
+            <div>
+                <p style={estilos.secaoLabel}>Ou digite o valor</p>
+                <div style={estilos.inputGroup}>
+                    <span style={estilos.inputPrefix}>R$</span>
+                    <input
+                        type="number"
+                        min={LIMITES.DEPOSITO_MIN_BRL}
+                        max={LIMITES.DEPOSITO_MAX_BRL}
+                        step="1"
+                        placeholder="0,00"
+                        value={valorBRL}
+                        onChange={e => {
+                            setValorBRL(e.target.value);
+                            setErroValor('');
                         }}
-                    >
-                        {comprando
-                            ? 'Processando...'
-                            : `Comprar por R$ ${selecionado.precoReal.toFixed(2).replace('.', ',')}`
-                        }
-                    </button>
+                        style={estilos.input}
+                    />
+                    {valorNum > 0 && (
+                        <span style={estilos.inputSufixo}>
+                            = {Math.floor(valorNum)} fichas
+                        </span>
+                    )}
+                </div>
+                {erroValor && <p style={estilos.erroTexto}>{erroValor}</p>}
+            </div>
 
-                    <p style={estilos.avisoSeguro}>
-                        🔒 Pagamento seguro · Crédito imediato
-                    </p>
+            {/* ---- Preview do cálculo ---- */}
+            {calculo && (
+                <div style={estilos.preview}>
 
+                    {/* Fichas em destaque */}
+                    <div style={estilos.previewFichas}>
+                        <span style={estilos.previewFichasNum}>{fichasMesa}</span>
+                        <div>
+                            <p style={estilos.previewFichasLabel}>fichas na mesa</p>
+                            <p style={estilos.previewFichasSub}>₿C {fmtBC(calculo.bcRecebido)} na carteira</p>
+                        </div>
+                    </div>
+
+                    <div style={estilos.previewDivisor} />
+
+                    {/* Detalhes financeiros */}
+                    <LinhaPreview label="Valor depositado"          valor={`R$ ${fmt(calculo.valorBRL)}`} />
+                    <LinhaPreview
+                        label={`Taxa (${calculo.taxaPerc}%)`}
+                        valor={`+ R$ ${fmt(calculo.taxaBRL)}`}
+                        cor="#F59E0B"
+                    />
+                    <div style={estilos.previewDivisor} />
+                    <LinhaPreview label="Total cobrado"             valor={`R$ ${fmt(calculo.totalBRL)}`}           destaque />
+                    <LinhaPreview
+                        label="Saldo após depósito"
+                        valor={`₿C ${fmtBC(saldoAtual + calculo.bcRecebido)}`}
+                        cor="#4ADE80"
+                    />
                 </div>
             )}
 
-        </div>
-    );
-}
-
-
-// ================================================================
-// BLOCO 3: COMPONENTE CardPacote
-// Card clicável de cada pacote disponível
-// ================================================================
-
-function CardPacote({ pacote, selecionado, onSelecionar }) {
-
-    const percentBonus = pacote.bonus > 0
-        ? Math.round((pacote.bonus / pacote.valorBCBase) * 100)
-        : 0;
-
-    return (
-        <div
-            onClick={onSelecionar}
-            style={{
-                ...estilos.card,
-                border: selecionado
-                    ? `2px solid ${pacote.cor}`
-                    : '1px solid rgba(255,255,255,0.07)',
-                background: selecionado
-                    ? `${pacote.cor}12`
-                    : '#111827',
-                transform: selecionado ? 'scale(1.01)' : 'scale(1)',
-            }}
-        >
-            {/* Badge "Mais popular" */}
-            {pacote.destaque && (
-                <div style={{
-                    ...estilos.badgeDestaque,
-                    background: pacote.cor,
-                }}>
-                    Mais popular
-                </div>
+            {/* ---- Método de pagamento ---- */}
+            {calculo && (
+                <>
+                    <p style={estilos.labelMetodo}>Pagar com</p>
+                    <div style={estilos.metodos}>
+                        {[
+                            { id: 'pix',    icone: '📱', label: 'PIX',    badge: 'Recomendado' },
+                            { id: 'cartao', icone: '💳', label: 'Cartão', badge: null },
+                        ].map(m => (
+                            <button
+                                key={m.id}
+                                onClick={() => setMetodo(m.id)}
+                                style={{
+                                    ...estilos.btnMetodo,
+                                    background: metodo === m.id ? 'rgba(124,58,237,0.15)' : 'rgba(255,255,255,0.04)',
+                                    border:     metodo === m.id ? '1px solid rgba(124,58,237,0.4)' : '1px solid rgba(255,255,255,0.08)',
+                                    color:      metodo === m.id ? '#A78BFA' : 'rgba(255,255,255,0.5)',
+                                }}
+                            >
+                                <span style={{ fontSize: '18px' }}>{m.icone}</span>
+                                <span style={{ fontSize: '12px', fontWeight: metodo === m.id ? '600' : '400' }}>
+                                    {m.label}
+                                </span>
+                                {m.badge && <span style={estilos.badgePix}>{m.badge}</span>}
+                            </button>
+                        ))}
+                    </div>
+                </>
             )}
 
-            {/* Badge de bônus */}
-            {percentBonus > 0 && (
-                <div style={estilos.badgeBonus}>
-                    +{percentBonus}%
-                </div>
-            )}
+            {/* ---- Botão comprar ---- */}
+            <button
+                onClick={handleComprar}
+                disabled={!calculo}
+                style={{
+                    ...estilos.btnConfirmar,
+                    background: calculo ? 'linear-gradient(135deg, #7C3AED, #4F46E5)' : 'rgba(255,255,255,0.08)',
+                    color:      calculo ? '#fff' : 'rgba(255,255,255,0.3)',
+                    cursor:     calculo ? 'pointer' : 'not-allowed',
+                }}
+            >
+                {calculo
+                    ? `${metodo === 'pix' ? '📱' : '💳'} Pagar R$ ${fmt(calculo.totalBRL)} · Receber ${fichasMesa} fichas`
+                    : 'Selecione um valor'
+                }
+            </button>
 
-            {/* Ícone e nome */}
-            <div style={estilos.cardTopo}>
-                <span style={{ fontSize: '24px' }}>{pacote.icone}</span>
-                <span style={{ ...estilos.cardNome, color: pacote.cor }}>
-                    {pacote.nome}
-                </span>
-            </div>
-
-            {/* Valor em ₿C */}
-            <div style={estilos.cardBC}>
-                <span style={estilos.simboloBC}>₿C</span>
-                <span style={{ ...estilos.valorBC, color: pacote.cor }}>
-                    {fmt(pacote.valorBC)}
-                </span>
-            </div>
-
-            {/* Descrição do bônus */}
-            {pacote.bonus > 0 && (
-                <p style={estilos.cardDescricao}>{pacote.descricao}</p>
-            )}
-
-            {/* Preço em reais */}
-            <div style={{
-                ...estilos.cardPreco,
-                background: selecionado ? `${pacote.cor}20` : 'rgba(255,255,255,0.04)',
-                border:     selecionado ? `1px solid ${pacote.cor}40` : '1px solid transparent',
-            }}>
-                <span style={estilos.cifrao}>R$</span>
-                <span style={estilos.precoValor}>
-                    {pacote.precoReal.toFixed(2).replace('.', ',')}
-                </span>
-            </div>
-
-            {/* Custo-benefício */}
-            <p style={estilos.custoBeneficio}>
-                R$ {valorPorBC(pacote)} por 100 ₿C
+            <p style={estilos.avisoSeguro}>
+                🔒 Pagamento seguro via Mercado Pago · Fichas creditadas automaticamente
             </p>
 
         </div>
@@ -333,39 +395,33 @@ function CardPacote({ pacote, selecionado, onSelecionar }) {
 
 
 // ================================================================
-// BLOCO 4: COMPONENTE BotaoPagamento
-// Botão de método de pagamento (PIX, Cartão)
+// SUBCOMPONENTES
 // ================================================================
 
-function BotaoPagamento({ icone, label, destaque }) {
-    const [ativo, setAtivo] = useState(destaque || false);
-
+function LinhaPreview({ label, valor, cor, destaque }) {
     return (
-        <button
-            onClick={() => setAtivo(true)}
-            style={{
-                ...estilos.btnPagamento,
-                background: ativo ? 'rgba(124,58,237,0.15)' : 'rgba(255,255,255,0.04)',
-                border:     ativo
-                    ? '1px solid rgba(124,58,237,0.4)'
-                    : '1px solid rgba(255,255,255,0.08)',
-                color:      ativo ? '#A78BFA' : 'rgba(255,255,255,0.5)',
-            }}
-        >
-            <span style={{ fontSize: '18px' }}>{icone}</span>
-            <span style={{ fontSize: '13px', fontWeight: ativo ? '600' : '400' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <span style={{
+                fontSize:   destaque ? '13px' : '12px',
+                color:      'rgba(255,255,255,0.45)',
+                fontWeight: destaque ? '500' : '400',
+            }}>
                 {label}
             </span>
-            {destaque && (
-                <span style={estilos.badgePix}>Recomendado</span>
-            )}
-        </button>
+            <span style={{
+                fontSize:   destaque ? '14px' : '13px',
+                fontWeight: destaque ? '700' : '500',
+                color:      cor || '#F8FAFC',
+            }}>
+                {valor}
+            </span>
+        </div>
     );
 }
 
 
 // ================================================================
-// BLOCO 5: ESTILOS
+// ESTILOS
 // ================================================================
 
 const estilos = {
@@ -373,13 +429,12 @@ const estilos = {
     container: {
         display:       'flex',
         flexDirection: 'column',
-        gap:           '14px',
+        gap:           '16px',
     },
 
-    // Aviso informativo sobre a moeda
     avisoMoeda: {
         display:      'flex',
-        gap:          '10px',
+        gap:          '8px',
         alignItems:   'flex-start',
         padding:      '10px 12px',
         background:   'rgba(59,130,246,0.08)',
@@ -388,170 +443,134 @@ const estilos = {
     },
 
     avisoTexto: {
-        fontSize:   '12px',
+        fontSize:   '11px',
         color:      'rgba(255,255,255,0.5)',
         margin:     0,
         lineHeight: 1.5,
     },
 
-    // Grid 2x2 de pacotes
-    grid: {
-        display:             'grid',
-        gridTemplateColumns: '1fr 1fr',
-        gap:                 '10px',
+    secaoLabel: {
+        fontSize:      '11px',
+        fontWeight:    '600',
+        color:         'rgba(255,255,255,0.35)',
+        textTransform: 'uppercase',
+        letterSpacing: '0.05em',
+        margin:        '0 0 8px',
     },
 
-    // Card de pacote
-    card: {
-        borderRadius:  '12px',
-        padding:       '14px 12px',
-        cursor:        'pointer',
-        position:      'relative',
+    // Valores rápidos
+    valoresRapidos: {
+        display:             'grid',
+        gridTemplateColumns: 'repeat(5, 1fr)',
+        gap:                 '6px',
+    },
+
+    btnRapido: {
+        display:        'flex',
+        flexDirection:  'column',
+        alignItems:     'center',
+        gap:            '3px',
+        padding:        '10px 4px',
+        borderRadius:   '8px',
+        cursor:         'pointer',
+        outline:        'none',
+        fontFamily:     'inherit',
+        transition:     'all 0.15s',
+        WebkitTapHighlightColor: 'transparent',
+    },
+
+    // Campo livre
+    inputGroup: {
+        display:      'flex',
+        alignItems:   'center',
+        background:   'rgba(255,255,255,0.05)',
+        border:       '1px solid rgba(255,255,255,0.10)',
+        borderRadius: '8px',
+        overflow:     'hidden',
+    },
+
+    inputPrefix: {
+        padding:     '0 12px',
+        fontSize:    '14px',
+        fontWeight:  '700',
+        color:       '#F59E0B',
+        background:  'rgba(245,158,11,0.08)',
+        borderRight: '1px solid rgba(255,255,255,0.08)',
+        alignSelf:   'stretch',
+        display:     'flex',
+        alignItems:  'center',
+    },
+
+    input: {
+        flex:       1,
+        padding:    '12px',
+        background: 'transparent',
+        border:     'none',
+        outline:    'none',
+        color:      '#F8FAFC',
+        fontSize:   '16px',
+        fontWeight: '600',
+        fontFamily: 'inherit',
+    },
+
+    inputSufixo: {
+        padding:   '0 12px',
+        fontSize:  '11px',
+        color:     '#A78BFA',
+        fontWeight:'600',
+        whiteSpace:'nowrap',
+    },
+
+    erroTexto: {
+        fontSize:  '11px',
+        color:     '#FCA5A5',
+        margin:    '4px 0 0',
+    },
+
+    // Preview
+    preview: {
+        background:    'rgba(255,255,255,0.03)',
+        border:        '1px solid rgba(255,255,255,0.07)',
+        borderRadius:  '10px',
+        padding:       '14px',
         display:       'flex',
         flexDirection: 'column',
         gap:           '8px',
-        transition:    'all 0.2s',
-        WebkitTapHighlightColor: 'transparent',
-        overflow:      'hidden',
     },
 
-    // Badge "Mais popular"
-    badgeDestaque: {
-        position:     'absolute',
-        top:          0,
-        left:         0,
-        right:        0,
-        textAlign:    'center',
-        fontSize:     '10px',
-        fontWeight:   '600',
-        color:        'white',
-        padding:      '3px 0',
-        letterSpacing: '0.04em',
-    },
-
-    // Badge de % de bônus
-    badgeBonus: {
-        position:     'absolute',
-        top:          '6px',
-        right:        '6px',
-        background:   'rgba(34,197,94,0.2)',
-        border:       '1px solid rgba(34,197,94,0.3)',
-        borderRadius: '4px',
-        fontSize:     '10px',
-        fontWeight:   '700',
-        color:        '#4ADE80',
-        padding:      '2px 5px',
-    },
-
-    cardTopo: {
+    previewFichas: {
         display:    'flex',
         alignItems: 'center',
-        gap:        '6px',
-        marginTop:  '14px', // espaço para o badge "Mais popular"
+        gap:        '12px',
     },
 
-    cardNome: {
+    previewFichasNum: {
+        fontSize:   '36px',
+        fontWeight: '900',
+        color:      '#A78BFA',
+        lineHeight:  1,
+    },
+
+    previewFichasLabel: {
         fontSize:   '14px',
-        fontWeight: '700',
-    },
-
-    cardBC: {
-        display:    'flex',
-        alignItems: 'baseline',
-        gap:        '3px',
-    },
-
-    simboloBC: {
-        fontSize:   '11px',
-        color:      '#F59E0B',
-        fontWeight: '700',
-    },
-
-    valorBC: {
-        fontSize:   '20px',
-        fontWeight: '800',
-        lineHeight: 1,
-    },
-
-    cardDescricao: {
-        fontSize:   '10px',
-        color:      '#4ADE80',
+        fontWeight: '600',
+        color:      '#F8FAFC',
         margin:     0,
-        lineHeight: 1.3,
     },
 
-    // Box do preço em reais
-    cardPreco: {
-        display:        'flex',
-        alignItems:     'baseline',
-        justifyContent: 'center',
-        gap:            '3px',
-        padding:        '6px',
-        borderRadius:   '6px',
-        transition:     'all 0.2s',
-        marginTop:      'auto',
+    previewFichasSub: {
+        fontSize:  '11px',
+        color:     'rgba(255,255,255,0.35)',
+        margin:    '2px 0 0',
     },
 
-    cifrao: {
-        fontSize:   '11px',
-        color:      'rgba(255,255,255,0.4)',
-    },
-
-    precoValor: {
-        fontSize:   '16px',
-        fontWeight: '700',
-        color:      '#F8FAFC',
-    },
-
-    custoBeneficio: {
-        fontSize:  '9px',
-        color:     'rgba(255,255,255,0.25)',
-        margin:    0,
-        textAlign: 'center',
-    },
-
-    // Painel de confirmação de compra
-    confirmacao: {
-        background:    '#111827',
-        border:        '1px solid rgba(255,255,255,0.08)',
-        borderRadius:  '12px',
-        padding:       '16px',
-        display:       'flex',
-        flexDirection: 'column',
-        gap:           '12px',
-    },
-
-    // Resumo dos valores
-    resumo: {
-        display:       'flex',
-        flexDirection: 'column',
-        gap:           '8px',
-    },
-
-    resumoLinha: {
-        display:        'flex',
-        justifyContent: 'space-between',
-        alignItems:     'center',
-    },
-
-    resumoLabel: {
-        fontSize: '13px',
-        color:    'rgba(255,255,255,0.4)',
-    },
-
-    resumoValor: {
-        fontSize:   '13px',
-        fontWeight: '500',
-        color:      '#F8FAFC',
-    },
-
-    separador: {
+    previewDivisor: {
         height:     '1px',
         background: 'rgba(255,255,255,0.06)',
-        margin:     '2px 0',
     },
 
-    labelPagamento: {
+    // Método de pagamento
+    labelMetodo: {
         fontSize:      '11px',
         color:         'rgba(255,255,255,0.35)',
         textTransform: 'uppercase',
@@ -559,14 +578,13 @@ const estilos = {
         margin:        0,
     },
 
-    // Container dos métodos de pagamento
-    metodosPagamento: {
+    metodos: {
         display:             'grid',
         gridTemplateColumns: '1fr 1fr',
         gap:                 '8px',
     },
 
-    btnPagamento: {
+    btnMetodo: {
         display:       'flex',
         flexDirection: 'column',
         alignItems:    'center',
@@ -574,10 +592,10 @@ const estilos = {
         padding:       '10px',
         borderRadius:  '8px',
         cursor:        'pointer',
+        outline:       'none',
+        fontFamily:    'inherit',
         transition:    'all 0.15s',
         WebkitTapHighlightColor: 'transparent',
-        outline:       'none',
-        position:      'relative',
     },
 
     badgePix: {
@@ -589,16 +607,15 @@ const estilos = {
         fontWeight:   '600',
     },
 
-    // Botão de confirmar compra
     btnConfirmar: {
         width:        '100%',
-        padding:      '13px',
+        padding:      '14px',
         border:       'none',
         borderRadius: '10px',
-        color:        'white',
-        fontSize:     '15px',
+        fontSize:     '14px',
         fontWeight:   '600',
         transition:   'opacity 0.2s',
+        fontFamily:   'inherit',
         WebkitTapHighlightColor: 'transparent',
     },
 
@@ -607,5 +624,114 @@ const estilos = {
         color:     'rgba(255,255,255,0.25)',
         textAlign: 'center',
         margin:    0,
+    },
+
+    // Estados
+    estadoBox: {
+        display:        'flex',
+        flexDirection:  'column',
+        alignItems:     'center',
+        gap:            '12px',
+        padding:        '40px 20px',
+        textAlign:      'center',
+    },
+
+    estadoTitulo: {
+        fontSize:   '16px',
+        fontWeight: '700',
+        color:      '#F8FAFC',
+        margin:     0,
+    },
+
+    estadoSub: {
+        fontSize:  '13px',
+        color:     'rgba(255,255,255,0.40)',
+        margin:    0,
+    },
+
+    // QR Code
+    qrcodeBox: {
+        display:        'flex',
+        flexDirection:  'column',
+        alignItems:     'center',
+        gap:            '14px',
+        background:     '#111827',
+        border:         '1px solid rgba(255,255,255,0.08)',
+        borderRadius:   '14px',
+        padding:        '20px 16px',
+    },
+
+    qrcodeTitulo: {
+        fontSize:   '16px',
+        fontWeight: '700',
+        color:      '#F8FAFC',
+        margin:     0,
+    },
+
+    qrcodeSub: {
+        fontSize:  '12px',
+        color:     'rgba(255,255,255,0.40)',
+        margin:    0,
+        textAlign: 'center',
+    },
+
+    qrcodeImg: {
+        width:        '200px',
+        height:       '200px',
+        borderRadius: '12px',
+        border:       '3px solid rgba(255,255,255,0.1)',
+    },
+
+    qrcodePlaceholder: {
+        width:          '200px',
+        height:         '200px',
+        borderRadius:   '12px',
+        border:         '2px dashed rgba(255,255,255,0.15)',
+        display:        'flex',
+        flexDirection:  'column',
+        alignItems:     'center',
+        justifyContent: 'center',
+    },
+
+    qrcodeResumo: {
+        display:        'flex',
+        justifyContent: 'space-between',
+        alignItems:     'center',
+        width:          '100%',
+        padding:        '10px 12px',
+        background:     'rgba(255,255,255,0.04)',
+        borderRadius:   '8px',
+    },
+
+    btnCopiarPix: {
+        width:        '100%',
+        padding:      '11px',
+        background:   'rgba(34,197,94,0.12)',
+        border:       '1px solid rgba(34,197,94,0.30)',
+        borderRadius: '8px',
+        color:        '#4ADE80',
+        fontSize:     '13px',
+        fontWeight:   '600',
+        cursor:       'pointer',
+        fontFamily:   'inherit',
+        WebkitTapHighlightColor: 'transparent',
+    },
+
+    qrcodeAviso: {
+        fontSize:  '11px',
+        color:     'rgba(255,255,255,0.30)',
+        margin:    0,
+        textAlign: 'center',
+    },
+
+    btnCancelarQr: {
+        background:   'transparent',
+        border:       '1px solid rgba(255,255,255,0.10)',
+        borderRadius: '8px',
+        color:        'rgba(255,255,255,0.35)',
+        fontSize:     '12px',
+        padding:      '8px 20px',
+        cursor:       'pointer',
+        fontFamily:   'inherit',
     },
 };

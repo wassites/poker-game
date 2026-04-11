@@ -34,9 +34,9 @@ export const COTACAO = {
 };
 
 export const TAXAS = {
-    DEPOSITO:  0.05,         // 5% sobre R$ (cobrada em R$ além do valor)
-    SAQUE:     0.03,         // 3% sobre R$ equivalente (descontada do valor)
-    ENVIO:     0.01,         // 1% sobre ₿C enviados
+    DEPOSITO:  0.10,         // 5% sobre R$ (cobrada em R$ além do valor)
+    SAQUE:     0.10,         // 3% sobre R$ equivalente (descontada do valor)
+    ENVIO:     0.10,         // 1% sobre ₿C enviados
     ENVIO_MIN: 10,           // taxa mínima de envio em ₿C
 };
 
