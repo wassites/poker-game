@@ -36,10 +36,10 @@ import ModalSenha     from './ModalSenha';
 import ModalPerfil    from './ModalPerfil';
 
 // Wallet — primeira aba do menu do jogador
-import WalletIndex    from './Menu/Wallet/index';
+import WalletIndex    from '../Wallet/index';
 
 // Bônus de boas-vindas — aparece automaticamente no 1º acesso
-import ModalBoasVindas from './Menu/Wallet/BoasVindas';
+import ModalBoasVindas from '../Wallet/BonasVindas';
 
 
 // ================================================================

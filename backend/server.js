@@ -73,14 +73,24 @@ dotenv.config();
 const app    = express();
 const server = createServer(app);
 
+const ORIGENS_PERMITIDAS = [
+    'http://localhost:5173',
+    'http://localhost:3000',
+    'https://poker-game-tawny-rho.vercel.app',
+    process.env.CLIENT_URL,
+].filter(Boolean);
+
 const io = new Server(server, {
     cors: {
-        origin: [
-            process.env.CLIENT_URL || 'http://localhost:5173',
-            'http://localhost:5173',
-            'https://poker-game-tawny-rho.vercel.app',
-        ],
-        methods: ['GET', 'POST'],
+        origin: (origin, callback) => {
+            if (!origin || ORIGENS_PERMITIDAS.includes(origin)) {
+                callback(null, true);
+            } else {
+                callback(new Error(`CORS bloqueado: ${origin}`));
+            }
+        },
+        methods:     ['GET', 'POST'],
+        credentials: true,
     },
     pingTimeout:  60000,
     pingInterval: 25000,

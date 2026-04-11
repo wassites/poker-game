@@ -760,3 +760,105 @@ function encontrarSocket(io, uid) {
     }
     return null;
 }
+
+
+// ================================================================
+// BLOCO 7: EVENTOS DE PIN (adicionar dentro de registrarEventosWallet)
+//
+// IMPORTANTE: Adicione estes dois socket.on() dentro da função
+// registrarEventosWallet(), logo antes do fechamento da função.
+// ================================================================
+
+/*
+    Copie e cole os dois blocos abaixo DENTRO de registrarEventosWallet(),
+    antes do último fechamento de chave }
+
+    // ----------------------------------------------------------------
+    // EVENTO: wallet:criar_pin
+    // Chamado no primeiro cadastro — salva o hash do PIN no Firestore.
+    // O PIN nunca é salvo em texto claro.
+    //
+    // Dados recebidos: { uid, pin }
+    // ----------------------------------------------------------------
+    socket.on('wallet:criar_pin', async ({ pin } = {}) => {
+        const jogadorUid = uid();
+        if (!jogadorUid) return;
+
+        try {
+            if (!pin || pin.length < 6) {
+                socket.emit('wallet:pin_erro', { mensagem: 'PIN inválido.' });
+                return;
+            }
+
+            // Verifica se já tem PIN (não permite recriar via este evento)
+            const perfil = await getPerfil(jogadorUid);
+            if (perfil?.pinHash) {
+                socket.emit('wallet:pin_erro', { mensagem: 'PIN já existe. Use alterar PIN.' });
+                return;
+            }
+
+            // Gera hash bcrypt com salt 12 (seguro e razoavelmente rápido)
+            const pinHash = await bcrypt.hash(String(pin), 12);
+
+            await refJogador(jogadorUid).update({ pinHash });
+
+            socket.emit('wallet:pin_criado');
+            console.log(`🔐 PIN criado para ${socket.data.nome}`);
+
+        } catch (e) {
+            console.error('Erro ao criar PIN:', e.message);
+            socket.emit('wallet:pin_erro', { mensagem: 'Erro ao salvar PIN.' });
+        }
+    });
+
+
+    // ----------------------------------------------------------------
+    // EVENTO: wallet:alterar_pin
+    // Verifica o PIN atual com bcrypt e salva o novo hash.
+    //
+    // Dados recebidos: { uid, pinAtual, pinNovo }
+    // ----------------------------------------------------------------
+    socket.on('wallet:alterar_pin', async ({ pinAtual, pinNovo } = {}) => {
+        const jogadorUid = uid();
+        if (!jogadorUid) return;
+
+        try {
+            if (!pinAtual || !pinNovo || pinNovo.length < 6) {
+                socket.emit('wallet:pin_erro', { mensagem: 'Dados inválidos.' });
+                return;
+            }
+
+            const perfil = await getPerfil(jogadorUid);
+
+            if (!perfil?.pinHash) {
+                socket.emit('wallet:pin_erro', { mensagem: 'PIN não configurado.' });
+                return;
+            }
+
+            // Verifica o PIN atual
+            const pinOk = await bcrypt.compare(String(pinAtual), perfil.pinHash);
+            if (!pinOk) {
+                socket.emit('wallet:pin_erro', { tipo: 'PIN_INCORRETO', mensagem: 'PIN atual incorreto.' });
+                return;
+            }
+
+            // Não permite usar o mesmo PIN
+            const mesmoPIN = await bcrypt.compare(String(pinNovo), perfil.pinHash);
+            if (mesmoPIN) {
+                socket.emit('wallet:pin_erro', { mensagem: 'O novo PIN deve ser diferente do atual.' });
+                return;
+            }
+
+            // Salva o novo hash
+            const novoPinHash = await bcrypt.hash(String(pinNovo), 12);
+            await refJogador(jogadorUid).update({ pinHash: novoPinHash });
+
+            socket.emit('wallet:pin_alterado');
+            console.log(`🔐 PIN alterado para ${socket.data.nome}`);
+
+        } catch (e) {
+            console.error('Erro ao alterar PIN:', e.message);
+            socket.emit('wallet:pin_erro', { mensagem: 'Erro ao alterar PIN.' });
+        }
+    });
+*/
