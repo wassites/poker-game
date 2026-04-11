@@ -1,6 +1,14 @@
 /* ================================================================
    ARQUIVO: backend/server.js
-   
+
+   MUDANÇAS DESTA VERSÃO:
+     → Importa e registra registrarEventosWallet() para cada socket
+     → Rota POST /webhook/mercadopago para confirmação de pagamentos
+     → express.raw() para capturar rawBody necessário na validação
+       da assinatura HMAC do webhook do Mercado Pago
+     → resetarLimiteDiario() agendado para meia-noite todo dia
+     → Rota GET /jogador/:uid para buscar perfil (usado pelo SendBC)
+
    CONCEITO GERAL:
    Este é o PONTO DE ENTRADA do servidor — o primeiro arquivo
    que o Node.js executa quando você roda "node server.js".
@@ -9,14 +17,12 @@
      1. Cria o servidor HTTP com Express
      2. Anexa o Socket.io nesse servidor (tempo real)
      3. Define todos os eventos do jogo (entrar, agir, sair, etc.)
+        + todos os eventos da carteira (via wallet-manager.js)
 
    COMO O SOCKET.IO FUNCIONA:
      O cliente (React) conecta via WebSocket.
      O servidor escuta eventos:  socket.on('nome', dados => ...)
      O servidor emite eventos:   io.to(sala).emit('nome', dados)
-     
-     É como um chat bidirecional — cliente e servidor se falam
-     em tempo real sem precisar de requisições HTTP a cada ação.
 
    FLUXO DE UMA PARTIDA:
      1. Cliente conecta    → 'connection'
@@ -29,13 +35,16 @@
      8. Cliente sai        → 'disconnect' ou 'sair_mesa'
 
    ROTAS REST:
-     GET /health  → verifica saúde do servidor
-     GET /mesas   → lista mesas abertas no lobby
-     GET /ranking → top jogadores (NOVO — salvo no Firestore)
+     GET  /health                → verifica saúde do servidor
+     GET  /mesas                 → lista mesas abertas no lobby
+     GET  /ranking               → top jogadores (Firestore)
+     POST /webhook/mercadopago   → confirmação de pagamentos (NOVO)
 
    VARIÁVEIS DE AMBIENTE (.env):
-     PORT       → porta do servidor (padrão 3001)
-     CLIENT_URL → URL do frontend React (para CORS)
+     PORT              → porta do servidor (padrão 3001)
+     CLIENT_URL        → URL do frontend React (para CORS)
+     MP_ACCESS_TOKEN   → token privado do Mercado Pago
+     MP_WEBHOOK_SECRET → chave para validar webhooks do MP
 ================================================================ */
 
 import express          from 'express';
@@ -45,35 +54,27 @@ import cors             from 'cors';
 import dotenv           from 'dotenv';
 import { GameManager  } from './game-manager.js';
 
-// NOVO: Firebase Admin para salvar e buscar ranking no Firestore
+// Firebase Admin para ranking e perfis
 import { buscarRanking } from './firebase-admin.js';
 
-// dotenv.config() lê o arquivo .env e coloca as variáveis em process.env
-// Deve ser chamado ANTES de qualquer process.env.VARIAVEL
+// Wallet — eventos Socket.io e reset diário
+import { registrarEventosWallet, resetarLimiteDiario } from './wallet/wallet-manager.js';
+
+// Mercado Pago — webhook de confirmação de pagamentos
+import { processarWebhookMP } from './wallet/mercadopago.js';
+
 dotenv.config();
 
 
 // ================================================================
 // BLOCO 1: CONFIGURAÇÃO DO SERVIDOR HTTP + SOCKET.IO
-//
-// Por que não usar Express sozinho?
-//   Express sozinho só suporta HTTP (requisição → resposta).
-//   Socket.io precisa de uma conexão persistente (WebSocket).
-//   A solução: criar um servidor HTTP nativo e "anexar" os dois.
-//
-// Hierarquia:
-//   app (Express) → server (HTTP) → io (Socket.io)
-//   O Express cuida das rotas REST (/health, /mesas, /ranking).
-//   O Socket.io cuida dos eventos em tempo real (acao, entrar_mesa).
 // ================================================================
 
 const app    = express();
 const server = createServer(app);
 
-// Socket.io anexado ao servidor HTTP
 const io = new Server(server, {
     cors: {
-        // Aceita Vercel em produção e localhost em desenvolvimento
         origin: [
             process.env.CLIENT_URL || 'http://localhost:5173',
             'http://localhost:5173',
@@ -85,32 +86,36 @@ const io = new Server(server, {
     pingInterval: 25000,
 });
 
-// Instancia o GameManager passando o io para ele poder emitir eventos
 const gameManager = new GameManager(io);
 
 
 // ================================================================
 // BLOCO 2: MIDDLEWARES DO EXPRESS
 //
-// cors(): permite que o frontend (outro domínio) acesse a API.
-//   Usamos uma função de origem dinâmica para aceitar múltiplos domínios:
-//   Vercel em produção + localhost em desenvolvimento.
-//
-// express.json(): permite receber JSON no body das requisições.
+// IMPORTANTE: express.raw() deve vir ANTES de express.json()
+// para capturar o rawBody necessário na validação do webhook MP.
+// O rawBody é o body em bytes brutos — necessário para recalcular
+// a assinatura HMAC e verificar se o webhook é legítimo.
 // ================================================================
 
+// Captura rawBody para validação do webhook HMAC
+app.use('/webhook/mercadopago', express.raw({ type: 'application/json' }), (req, res, next) => {
+    if (Buffer.isBuffer(req.body)) {
+        req.rawBody = req.body.toString('utf8');
+        req.body    = JSON.parse(req.rawBody);
+    }
+    next();
+});
+
 app.use(cors({
-    // Função de origem: verifica se o domínio é permitido
-    // Mais flexível que uma string fixa — funciona para dev e produção
     origin: (origin, callback) => {
         const permitidas = [
             'http://localhost:5173',
             'http://localhost:3000',
             process.env.CLIENT_URL,
             'https://poker-game-tawny-rho.vercel.app',
-        ].filter(Boolean); // remove valores undefined/null
+        ].filter(Boolean);
 
-        // Permite requisições sem origin (ex: Postman, curl, Railway health check)
         if (!origin || permitidas.includes(origin)) {
             callback(null, true);
         } else {
@@ -124,19 +129,10 @@ app.use(express.json());
 
 
 // ================================================================
-// BLOCO 3: ROTAS REST (HTTP NORMAL)
-//
-// Estas rotas são acessadas via fetch() no React.
-// Usamos HTTP para operações que NÃO precisam de tempo real:
-//   → Verificar saúde do servidor
-//   → Listar mesas disponíveis no lobby
-//   → Buscar ranking de jogadores (NOVO)
-//
-// Operações de JOGO (ações, cartas, pote) ficam no Socket.io.
+// BLOCO 3: ROTAS REST
 // ================================================================
 
 // GET /health → verifica se o servidor está online
-// Usado pelo Railway para saber se o servidor está saudável
 app.get('/health', (req, res) => {
     res.json({
         status:  'ok',
@@ -147,7 +143,6 @@ app.get('/health', (req, res) => {
 });
 
 // GET /mesas → lista mesas abertas para o lobby
-// O frontend chama isso ao entrar no lobby para mostrar a lista
 app.get('/mesas', (req, res) => {
     const mesas = gameManager.getMesasAtivas()
         .filter(m => m.fase === 'AGUARDANDO')
@@ -165,25 +160,32 @@ app.get('/mesas', (req, res) => {
 });
 
 // GET /ranking → retorna top jogadores salvos no Firestore
-//
-// NOVO: os dados são salvos pelo game-manager.js via firebase-admin.js
-// ao fim de cada rodada completa. Esta rota apenas os lê e retorna.
-//
-// Query params:
-//   top → quantos jogadores retornar (padrão: 20, máximo: 100)
-//   Exemplo: GET /ranking?top=10 → retorna os 10 melhores
 app.get('/ranking', async (req, res) => {
     const top     = Math.min(parseInt(req.query.top) || 20, 100);
     const ranking = await buscarRanking(top);
     res.json({ ranking });
 });
 
+// ----------------------------------------------------------------
+// POST /webhook/mercadopago
+// Recebe notificações de pagamento do Mercado Pago.
+//
+// FLUXO:
+//   1. MP chama este endpoint quando pagamento é aprovado
+//   2. Validamos a assinatura HMAC com MP_WEBHOOK_SECRET
+//   3. Buscamos detalhes do pagamento na API do MP
+//   4. Se status === 'approved' → chamamos creditarDeposito()
+//   5. creditarDeposito() credita ₿C e notifica o socket do jogador
+//
+// IMPORTANTE: respondemos 200 imediatamente (antes do processamento)
+//   O MP considera falha se não receber 200 em < 5 segundos.
+//   O processamento acontece de forma assíncrona depois.
+// ----------------------------------------------------------------
+app.post('/webhook/mercadopago', processarWebhookMP(io));
+
 
 // ================================================================
 // BLOCO 4: MAP DE SOCKETS
-//
-// Rastreia em qual mesa cada socket está.
-// socketId → mesaId
 // ================================================================
 
 const socketMesa = new Map();
@@ -191,24 +193,20 @@ const socketMesa = new Map();
 
 // ================================================================
 // BLOCO 5: EVENTOS DO SOCKET.IO
-//
-// io.on('connection') roda toda vez que um cliente conecta.
-// Dentro dele, definimos todos os eventos daquele socket.
-//
-// O parâmetro 'socket' representa UM cliente conectado.
-// 'io' representa TODOS os clientes (para broadcast).
 // ================================================================
 
 io.on('connection', (socket) => {
     console.log(`Socket conectado: ${socket.id}`);
 
+    // ----------------------------------------------------------------
+    // Registra todos os eventos da carteira para este socket
+    // Separado em wallet-manager.js para manter o server.js limpo
+    // ----------------------------------------------------------------
+    registrarEventosWallet(socket, io);
+
 
     // ----------------------------------------------------------------
     // EVENTO: autenticar
-    // Primeiro evento que o cliente envia após conectar.
-    // Registra uid, nome e avatar no socket para uso posterior.
-    //
-    // Dados recebidos: { uid, nome, avatar }
     // ----------------------------------------------------------------
     socket.on('autenticar', (dados) => {
         if (!dados?.uid) {
@@ -227,10 +225,6 @@ io.on('connection', (socket) => {
 
     // ----------------------------------------------------------------
     // EVENTO: criar_mesa
-    // Host cria uma nova mesa no lobby.
-    //
-    // Dados recebidos: { nome, buyIn, smallBlind, qtdBots }
-    // Emite de volta: 'mesa_criada' com o mesaId
     // ----------------------------------------------------------------
     socket.on('criar_mesa', async (config) => {
         if (!socket.data.uid) {
@@ -271,9 +265,6 @@ io.on('connection', (socket) => {
 
     // ----------------------------------------------------------------
     // EVENTO: entrar_mesa
-    // Jogador entra em uma mesa existente.
-    //
-    // Dados recebidos: { mesaId }
     // ----------------------------------------------------------------
     socket.on('entrar_mesa', (dados) => {
         if (!socket.data.uid) {
@@ -309,7 +300,6 @@ io.on('connection', (socket) => {
 
     // ----------------------------------------------------------------
     // EVENTO: iniciar_rodada
-    // Somente o host pode iniciar.
     // ----------------------------------------------------------------
     socket.on('iniciar_rodada', () => {
         const mesaId = socket.data.mesaId;
@@ -335,9 +325,6 @@ io.on('connection', (socket) => {
 
     // ----------------------------------------------------------------
     // EVENTO: acao
-    // Jogador executa uma ação (FOLD, CHECK, CALL, RAISE).
-    //
-    // Dados recebidos: { acao: 'FOLD'|'CHECK'|'CALL'|'RAISE', valor: number }
     // ----------------------------------------------------------------
     socket.on('acao', (dados) => {
         const mesaId = socket.data.mesaId;
@@ -359,7 +346,6 @@ io.on('connection', (socket) => {
 
     // ----------------------------------------------------------------
     // EVENTO: adicionar_bot
-    // Host adiciona um bot manualmente.
     // ----------------------------------------------------------------
     socket.on('adicionar_bot', (dados) => {
         const mesaId = socket.data.mesaId;
@@ -374,9 +360,6 @@ io.on('connection', (socket) => {
 
     // ----------------------------------------------------------------
     // EVENTO: rebuy
-    // Jogador compra mais fichas entre mãos.
-    //
-    // Dados recebidos: { valor: number }
     // ----------------------------------------------------------------
     socket.on('rebuy', (dados) => {
         const mesaId = socket.data.mesaId;
@@ -400,7 +383,6 @@ io.on('connection', (socket) => {
 
     // ----------------------------------------------------------------
     // EVENTO: sair_mesa
-    // Jogador sai voluntariamente da mesa.
     // ----------------------------------------------------------------
     socket.on('sair_mesa', () => {
         const mesaId = socket.data.mesaId;
@@ -420,7 +402,6 @@ io.on('connection', (socket) => {
 
     // ----------------------------------------------------------------
     // EVENTO: disconnect
-    // Dispara automaticamente quando o cliente perde a conexão.
     // ----------------------------------------------------------------
     socket.on('disconnect', (motivo) => {
         console.log(`Socket desconectado: ${socket.id} (${motivo})`);
@@ -429,7 +410,6 @@ io.on('connection', (socket) => {
         const uid    = socket.data.uid;
 
         if (mesaId && uid) {
-            // Delay de 5s antes de remover — tolerância para reconexão
             setTimeout(() => {
                 const mesa = gameManager.getMesa(mesaId);
                 if (!mesa) return;
@@ -445,7 +425,6 @@ io.on('connection', (socket) => {
 
     // ----------------------------------------------------------------
     // EVENTO: pedir_estado
-    // Cliente pede o estado atual da mesa (útil ao reconectar).
     // ----------------------------------------------------------------
     socket.on('pedir_estado', () => {
         const mesaId = socket.data.mesaId;
@@ -479,7 +458,34 @@ server.listen(PORT, () => {
 
 
 // ================================================================
-// BLOCO 7: TRATAMENTO DE ERROS GLOBAIS
+// BLOCO 7: RESET DIÁRIO DO LIMITE DE SAQUE
+//
+// Zera sacadoHoje para todos os jogadores à meia-noite.
+// Calcula o tempo até a próxima meia-noite e agenda com setTimeout.
+// Depois repete a cada 24h com setInterval.
+// ================================================================
+
+function agendarResetDiario() {
+    const agora       = new Date();
+    const meianoite   = new Date(agora);
+    meianoite.setHours(24, 0, 0, 0); // próxima meia-noite
+
+    const msAteMeianoite = meianoite.getTime() - agora.getTime();
+
+    setTimeout(async () => {
+        await resetarLimiteDiario();
+        // Depois da primeira vez, repete a cada 24h
+        setInterval(resetarLimiteDiario, 24 * 60 * 60 * 1000);
+    }, msAteMeianoite);
+
+    console.log(`🕐 Reset diário agendado em ${Math.round(msAteMeianoite / 1000 / 60)} minutos.`);
+}
+
+agendarResetDiario();
+
+
+// ================================================================
+// BLOCO 8: TRATAMENTO DE ERROS GLOBAIS
 // ================================================================
 
 process.on('unhandledRejection', (erro) => {
