@@ -75,7 +75,7 @@ const BOTS_POR_NIVEL = {
     1: [
         {
             nome: "Rookie",
-            avatar: "assets/avatar-homem1.png",
+            avatar: "/avata01.png",
             vpip: 0.75,         // Entra em 75% das mãos — joga demais
             pfr: 0.15,          // Raramente aumenta — muito passivo
             blefe: 0.05,        // Quase não blefa — com medo
@@ -87,7 +87,7 @@ const BOTS_POR_NIVEL = {
         },
         {
             nome: "Fishinho",
-            avatar: "assets/avatar-mulher1.png",
+            avatar: "/avata02.png",
             vpip: 0.80,         // O maior VPIP — joga praticamente tudo
             pfr: 0.10,          // Quase nunca aumenta
             blefe: 0.03,        // Rarissimamente blefa
@@ -99,7 +99,7 @@ const BOTS_POR_NIVEL = {
         },
         {
             nome: "Sortudo",
-            avatar: "assets/avatar-homem2.png",
+            avatar: "/avata03.png",
             vpip: 0.70,
             pfr: 0.20,
             blefe: 0.08,
@@ -117,7 +117,7 @@ const BOTS_POR_NIVEL = {
     2: [
         {
             nome: "SkyNet",
-            avatar: "assets/avatar-mulher2.png",
+            avatar: "/avata04.png",
             vpip: 0.55,         // Mais seletivo que iniciante
             pfr: 0.30,          // Aumenta em 30% das mãos — equilibrado
             blefe: 0.20,        // Blefa com alguma frequência
@@ -129,7 +129,7 @@ const BOTS_POR_NIVEL = {
         },
         {
             nome: "R2-D2",
-            avatar: "assets/avatar-mulher3.png",
+            avatar: "/avata05.png",
             vpip: 0.50,
             pfr: 0.40,          // Mais agressivo no pré-flop
             blefe: 0.25,
@@ -141,7 +141,7 @@ const BOTS_POR_NIVEL = {
         },
         {
             nome: "Matrix",
-            avatar: "assets/avatar-homem3.png",
+            avatar: "/avata06.png",
             vpip: 0.45,         // Mais seletivo do grupo intermediário
             pfr: 0.35,
             blefe: 0.30,
@@ -159,7 +159,7 @@ const BOTS_POR_NIVEL = {
     3: [
         {
             nome: "Terminator",
-            avatar: "assets/avatar-homem4.png",
+            avatar: "/avata07.png",
             vpip: 0.35,         // Joga apenas 35% das mãos — muito seletivo
             pfr: 0.28,
             blefe: 0.45,        // Blefa bastante MAS de forma estratégica
@@ -173,7 +173,7 @@ const BOTS_POR_NIVEL = {
         },
         {
             nome: "007-Bot",
-            avatar: "assets/avatar-mulher4.png",
+            avatar: "/avata08.png",
             vpip: 0.28,         // O mais seletivo do jogo
             pfr: 0.25,
             blefe: 0.50,        // Blefa em metade das situações — muito agressivo
@@ -185,7 +185,7 @@ const BOTS_POR_NIVEL = {
         },
         {
             nome: "Viper",
-            avatar: "assets/avatar-homem5.png",
+            avatar: "/avata09.png",
             vpip: 0.40,         // Um pouco mais loose que os outros avançados
             pfr: 0.35,
             blefe: 0.55,        // O maior blefe do jogo

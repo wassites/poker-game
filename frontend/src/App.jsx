@@ -222,7 +222,11 @@ export default function App() {
                 `}</style>
 
                 <div style={estilos.logoContainer}>
-                    <span style={estilos.logoEmoji}>🃏</span>
+                    <img 
+                        src="/logo.png" 
+                        alt="Poker Game" 
+                        style={{ width: '80px', height: '80px', objectFit: 'contain' }} 
+                    />
                     <h1 style={estilos.logoTitulo}>Poker Game</h1>
                     <p style={estilos.logoBitchager}>Powered by ₿C Bitchager</p>
                 </div>

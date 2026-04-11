@@ -2,26 +2,25 @@
    ARQUIVO: backend/game-manager.js
 
    MUDANÇAS DESTA VERSÃO:
-   → Importa salvarResultadoRodada do firebase-admin.js
-   → calcularVencedor: salva resultado no Firestore APÓS calcular
-     os premiados (ordem correta)
-   → finalizarMao: salva resultado no Firestore (vitória por W.O.)
+   → TEMPO_HUMANO: 90000 (90s), TEMPO_BOT: 30000 (30s)
+   → faltasSeguidas agora é POR JOGADOR (não da mesa)
+   → processarEstouroTempo: conta faltas e remove após MAX_FALTAS
+   → processarAcao: reseta faltasSeguidas quando jogador age
+   → criarJogador: inclui faltasSeguidas: 0
 ================================================================ */
 
 import { calcularForca } from './core/engine-poker.js';
 import { BotManager    } from './core/bots.js';
 import { gerarBaralho  } from './core/deck.js';
-
-// NOVO: salva resultado de cada rodada no Firestore para o ranking
 import { salvarResultadoRodada } from './firebase-admin.js';
 
 const mesas = new Map();
 
 const CONFIG = {
-    TEMPO_HUMANO:   45000,
-    TEMPO_BOT:       3500,
-    DELAY_SHOWDOWN:  8000,
-    MAX_FALTAS:          2,
+    TEMPO_HUMANO:   90000, // 1 minuto e 30 segundos
+    TEMPO_BOT:      30000, // 30 segundos
+    DELAY_SHOWDOWN:  8000, // 8 segundos antes da próxima rodada
+    MAX_FALTAS:          3, // faltas antes de ser removido da mesa
 };
 
 const BOT_FRASES = {
@@ -109,7 +108,6 @@ export class GameManager {
             turno:                null,
             baralho:              [],
             cartasComunitarias:   [],
-            faltasSeguidas:       0,
             mensagemVitoria:      null,
             ultimaAcaoDescritiva: 'Mesa criada. Aguardando jogadores.',
             ordem:                [usuario.uid],
@@ -168,30 +166,33 @@ export class GameManager {
 
         mesa.ordem.push(bot.uid);
         mesa.jogadores[bot.uid] = {
-            uid:          bot.uid,
-            nome:         bot.nome,
-            avatar:       bot.avatar,
-            saldo:        bot.saldo,
-            cartas:       [],
-            status:       'ativo',
-            apostaRodada: 0,
-            tipo:         'cpu',
-            estilo:       bot.estilo,
-            nivel:        bot.nivel,
+            uid:           bot.uid,
+            nome:          bot.nome,
+            avatar:        bot.avatar,
+            saldo:         bot.saldo,
+            cartas:        [],
+            status:        'ativo',
+            apostaRodada:  0,
+            faltasSeguidas: 0, // NOVO: faltas por jogador
+            tipo:          'cpu',
+            estilo:        bot.estilo,
+            nivel:         bot.nivel,
         };
 
         this.emitirEstado(mesaId);
     }
 
+    // NOVO: faltasSeguidas inicializado por jogador
     criarJogador(usuario, buyIn, tipo) {
         return {
-            uid:          usuario.uid,
-            nome:         usuario.nome,
-            avatar:       usuario.avatar || '',
-            saldo:        buyIn,
-            cartas:       [],
-            status:       'ativo',
-            apostaRodada: 0,
+            uid:           usuario.uid,
+            nome:          usuario.nome,
+            avatar:        usuario.avatar || '',
+            saldo:         buyIn,
+            cartas:        [],
+            status:        'ativo',
+            apostaRodada:  0,
+            faltasSeguidas: 0, // NOVO: contador de faltas por jogador
             tipo,
         };
     }
@@ -266,7 +267,6 @@ export class GameManager {
         mesa.bbId                 = bbId;
         mesa.primeiroJogador      = bbId;
         mesa.turno                = ativos[primeiroIdx];
-        mesa.faltasSeguidas       = 0;
         mesa.mensagemVitoria      = null;
         mesa.ultimaAcaoDescritiva = 'Nova rodada iniciada. Blinds apostados.';
 
@@ -300,6 +300,7 @@ export class GameManager {
         const ehBot = uid.startsWith('bot_');
         const tempo = ehBot ? CONFIG.TEMPO_BOT : CONFIG.TEMPO_HUMANO;
 
+        // Avisa o frontend para iniciar o temporizador visual
         this.io.to(mesaId).emit('iniciar_relogio', { uid, ms: tempo });
 
         const timerInfo = { timerAtivo: true, relogio: null, acao: null };
@@ -330,13 +331,51 @@ export class GameManager {
         this.timers.delete(mesaId);
     }
 
+    // ----------------------------------------------------------------
+    // NOVO: processa estouro de tempo com sistema de faltas por jogador
+    // Após MAX_FALTAS faltas consecutivas → remove da mesa
+    // ----------------------------------------------------------------
     processarEstouroTempo(mesaId, uid) {
         const mesa = mesas.get(mesaId);
         if (!mesa) return;
 
-        const jogador    = mesa.jogadores[uid];
+        const jogador = mesa.jogadores[uid];
+        if (!jogador) return;
+
+        // Incrementa faltas DO JOGADOR (não da mesa)
+        jogador.faltasSeguidas = (jogador.faltasSeguidas || 0) + 1;
+
+        console.log(`⏱ ${jogador.nome} faltou (${jogador.faltasSeguidas}/${CONFIG.MAX_FALTAS})`);
+
+        // Atingiu o limite → remove da mesa por inatividade
+        if (jogador.faltasSeguidas >= CONFIG.MAX_FALTAS) {
+            console.log(`🚫 ${jogador.nome} removido por inatividade.`);
+
+            // Avisa todos na mesa
+            this.io.to(mesaId).emit('notificacao', {
+                mensagem: `${jogador.nome} foi removido por inatividade.`
+            });
+
+            // Dá fold na mão atual antes de sair
+            jogador.status = 'fold';
+            jogador.cartas = [];
+
+            // Remove da mesa
+            this.sairMesa(mesaId, uid);
+
+            // Avança o jogo normalmente
+            this.avancarJogo(mesaId);
+            return;
+        }
+
+        // Ainda dentro do limite: fold ou check automático
         const podeChecar = (mesa.maiorAposta || 0) <= (jogador.apostaRodada || 0);
         const acao       = podeChecar ? 'CHECK' : 'FOLD';
+
+        // Avisa o jogador sobre a falta
+        this.io.to(mesaId).emit('notificacao', {
+            mensagem: `${jogador.nome} — falta ${jogador.faltasSeguidas}/${CONFIG.MAX_FALTAS} (${acao} automático)`
+        });
 
         this.processarAcao(mesaId, uid, acao, 0);
     }
@@ -356,6 +395,14 @@ export class GameManager {
         }
 
         const jogador    = mesa.jogadores[uid];
+        if (!jogador) return;
+
+        // NOVO: reseta faltas quando o jogador age voluntariamente
+        // socketId !== null = ação veio do cliente (não do estouro de tempo)
+        if (socketId !== null) {
+            jogador.faltasSeguidas = 0;
+        }
+
         const jaApostou  = jogador.apostaRodada || 0;
         const apostaMesa = mesa.maiorAposta     || 0;
         const custo      = apostaMesa - jaApostou;
@@ -601,7 +648,6 @@ export class GameManager {
         const mesa = mesas.get(mesaId);
         if (!mesa) return;
 
-        // Coleta elegíveis (não foldaram e têm cartas)
         const elegiveis = mesa.ordem
             .map(uid => ({ uid, jogador: mesa.jogadores[uid] }))
             .filter(({ jogador: j }) =>
@@ -616,16 +662,12 @@ export class GameManager {
             return;
         }
 
-        // Calcula força de cada elegível
         const forcas = {};
         elegiveis.forEach(({ uid, jogador }) => {
             forcas[uid] = calcularForca(jogador.cartas, mesa.cartasComunitarias);
         });
 
-        // Calcula os potes (principal + side pots)
-        const potes = this.calcularPotes(mesa, elegiveis.map(e => e.uid));
-
-        // Distribui cada pote para o vencedor elegível
+        const potes         = this.calcularPotes(mesa, elegiveis.map(e => e.uid));
         const premiados     = {};
         const descricoesMao = {};
 
@@ -650,12 +692,10 @@ export class GameManager {
             });
         });
 
-        // Aplica os prêmios aos saldos
         Object.entries(premiados).forEach(([uid, premio]) => {
             mesa.jogadores[uid].saldo += premio;
         });
 
-        // Monta mensagem de vitória
         const nomesVencedores = Object.keys(premiados).map(uid => {
             const j     = mesa.jogadores[uid];
             const mao   = descricoesMao[uid] || '';
@@ -668,21 +708,10 @@ export class GameManager {
         mesa.fase                 = 'SHOWDOWN';
         mesa.mensagemVitoria      = `🏆 ${nomesVencedores.join(' | ')}`;
         mesa.ultimaAcaoDescritiva = `Fim da mão. ${mesa.mensagemVitoria}`;
-        mesa.faltasSeguidas       = 0;
 
         this.emitirEstado(mesaId);
         this.agendarProximaRodada(mesaId);
 
-        // ----------------------------------------------------------------
-        // NOVO: salva resultado no Firestore para o ranking
-        //
-        // Chamado APÓS calcular premiados e agendarProximaRodada.
-        // Só salva jogadores humanos (bots são ignorados no firebase-admin.js).
-        //
-        // fichasGanhas:   quanto o jogador ganhou nesta mão (0 se perdeu)
-        // fichasPerdidas: quanto perdeu (0 se ganhou)
-        // venceu:         true se está na lista de premiados
-        // ----------------------------------------------------------------
         const resultados = elegiveis.map(({ uid, jogador }) => ({
             uid,
             nome:           jogador.nome,
@@ -740,10 +769,6 @@ export class GameManager {
         return potes;
     }
 
-    // ----------------------------------------------------------------
-    // NOVO: finalizarMao também salva no Firestore (vitória por W.O.)
-    // W.O. = todos os outros jogadores foldaram
-    // ----------------------------------------------------------------
     finalizarMao(mesaId, vencedorUid, porWO = false) {
         const mesa = mesas.get(mesaId);
         if (!mesa) return;
@@ -763,7 +788,6 @@ export class GameManager {
         this.emitirEstado(mesaId);
         this.agendarProximaRodada(mesaId);
 
-        // Salva resultado no Firestore — só o vencedor, só se for humano
         salvarResultadoRodada([{
             uid:            vencedorUid,
             nome:           j.nome,
@@ -775,8 +799,8 @@ export class GameManager {
     }
 
     agendarProximaRodada(mesaId) {
-        const t        = this.timers.get(mesaId) || {};
-        t.reiniciar    = setTimeout(() => {
+        const t     = this.timers.get(mesaId) || {};
+        t.reiniciar = setTimeout(() => {
             this.iniciarRodada(mesaId);
         }, CONFIG.DELAY_SHOWDOWN);
         this.timers.set(mesaId, t);

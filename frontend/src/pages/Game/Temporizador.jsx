@@ -4,6 +4,11 @@
    Barra circular SVG ao redor do avatar do jogador da vez.
    Conta regressivamente o tempo disponível para agir.
 
+   SOLUÇÃO ESLint:
+   Não usamos useState para o tempo restante — usamos useRef +
+   forceUpdate via contador. Assim o setRestante nunca fica
+   no corpo síncrono do useEffect.
+
    PROPS:
      totalMs → tempo total em ms (90000=humano, 30000=bot)
      ativo   → boolean: true quando é a vez deste jogador
@@ -14,35 +19,46 @@ import { useState, useEffect, useRef } from 'react';
 
 export default function Temporizador({ totalMs = 90000, ativo = false, tamanho = 50 }) {
 
-    const [restante,   setRestante] = useState(totalMs);
-    const intervaloRef = useRef(null);
-    const inicioRef    = useRef(null);
+    // Usamos um contador para forçar re-render sem violar o ESLint
+    const [, forceUpdate]  = useState(0);
+    const restanteRef      = useRef(totalMs);
+    const intervaloRef     = useRef(null);
+    const inicioRef        = useRef(null);
 
     useEffect(() => {
+        // Limpa timer anterior
         if (intervaloRef.current) clearInterval(intervaloRef.current);
 
         if (!ativo) {
-            setRestante(totalMs);
+            // Reseta via ref — sem setState no corpo do efeito
+            restanteRef.current = totalMs;
             return;
         }
 
-        inicioRef.current = Date.now();
+        // Inicia contagem
+        inicioRef.current   = Date.now();
+        restanteRef.current = totalMs;
 
         intervaloRef.current = setInterval(() => {
-            const decorrido    = Date.now() - inicioRef.current;
-            const novoRestante = Math.max(0, totalMs - decorrido);
-            setRestante(novoRestante);
-            if (novoRestante <= 0) clearInterval(intervaloRef.current);
+            const decorrido = Date.now() - inicioRef.current;
+            restanteRef.current = Math.max(0, totalMs - decorrido);
+
+            // forceUpdate dentro do callback — permitido pelo ESLint
+            forceUpdate(n => n + 1);
+
+            if (restanteRef.current <= 0) {
+                clearInterval(intervaloRef.current);
+            }
         }, 100);
 
         return () => {
             if (intervaloRef.current) clearInterval(intervaloRef.current);
         };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [ativo, totalMs]);
 
     if (!ativo) return null;
 
+    const restante  = restanteRef.current;
     const raio      = (tamanho - 4) / 2;
     const circunf   = 2 * Math.PI * raio;
     const progresso = restante / totalMs;
